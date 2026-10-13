@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -95,137 +96,255 @@ func (d *DB) Search(q Query) ([]Result, error) {
 
 	// Trigram branch is optional: when the query has no token ≥3 chars
 	// there's nothing it could match, and asking would be a no-op.
+	//
+	// The hit set carries only ids and bm25 scores. Snippets are built
+	// afterward, only for the excerpts on the returned page (see
+	// pageSnippets): a common term can match hundreds of thousands of
+	// messages, and snippet() over all of them dominated search time.
+	// Each hit is joined to its session through idx_messages_id_session
+	// when it exists, which avoids reading every matching message row from
+	// disk. Without it, the join falls back to the rowid lookup.
 	const triPenalty = 0.7 // bm25 returns negative scores; scale shrinks magnitude
-	var (
-		query string
-		args  []any
-	)
-	if matchTri != "" {
-		query = fmt.Sprintf(`
-        WITH raw_hits AS MATERIALIZED (
+	var args []any
+
+	// One read transaction so the snippet pass sees the same snapshot as
+	// the ranking pass, even while the indexer writes.
+	tx, err := d.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("search: %w", err)
+	}
+	defer tx.Rollback()
+
+	msgHint := ""
+	if !d.hasSearchIndex.Load() {
+		ok, err := indexExists(tx, searchIndexName)
+		if err != nil {
+			return nil, fmt.Errorf("search: %w", err)
+		}
+		d.hasSearchIndex.Store(ok)
+	}
+	if d.hasSearchIndex.Load() {
+		msgHint = "INDEXED BY " + searchIndexName
+	}
+
+	// src records which index produced the hit (srcPorter or srcTrigram) so
+	// the excerpt's snippet comes from the same index that scored it.
+	rawHits := fmt.Sprintf(`
             SELECT m.id AS mid, m.session_id, m.ordinal, m.role, m.ts,
-                   snippet(messages_fts, 0, '«', '»', '…', 12) AS snip,
-                   bm25(messages_fts) AS score
+                   %d AS src, bm25(messages_fts) AS score
             FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
+            JOIN messages m %s ON m.id = messages_fts.rowid
             JOIN sessions s ON s.id = m.session_id
-            WHERE messages_fts MATCH ? %[1]s
+            WHERE messages_fts MATCH ? %s`, srcPorter, msgHint, filterSQL)
+	args = append(args, matchPorter)
+	args = append(args, fargs...)
+
+	if matchTri != "" {
+		rawHits += fmt.Sprintf(`
             UNION ALL
             SELECT m.id, m.session_id, m.ordinal, m.role, m.ts,
-                   snippet(messages_fts_tri, 0, '«', '»', '…', 12),
-                   bm25(messages_fts_tri) * %[3]f
+                   %d, bm25(messages_fts_tri) * %f
             FROM messages_fts_tri
-            JOIN messages m ON m.id = messages_fts_tri.rowid
+            JOIN messages m %s ON m.id = messages_fts_tri.rowid
             JOIN sessions s ON s.id = m.session_id
-            WHERE messages_fts_tri MATCH ? %[1]s
-        ),
-        hits AS MATERIALIZED (
-            SELECT mid, session_id, ordinal, role, ts, snip, score FROM (
-                SELECT *, ROW_NUMBER() OVER (PARTITION BY mid ORDER BY score) AS drn
-                FROM raw_hits
-            ) WHERE drn = 1
-        ),
-        session_scores AS (
-            SELECT session_id, MIN(score) AS best_score, COUNT(*) AS match_count
-            FROM hits GROUP BY session_id
-        ),
-        top_sessions AS (
-            SELECT session_id, best_score, match_count
-            FROM session_scores ORDER BY best_score LIMIT ? OFFSET ?
-        ),
-        ranked AS (
-            SELECT h.*,
-                   ROW_NUMBER() OVER (PARTITION BY h.session_id ORDER BY h.score) AS rn
-            FROM hits h
-            WHERE h.session_id IN (SELECT session_id FROM top_sessions)
-        )
-        SELECT s.id, s.session_uid, s.agent,
-               COALESCE(s.workspace, ''), COALESCE(s.title, ''), COALESCE(s.summary, ''),
-               COALESCE(s.started_at, 0),
-               ts_info.best_score, ts_info.match_count,
-               r.ordinal, r.role, COALESCE(r.ts, 0), r.snip, r.score
-        FROM ranked r
-        JOIN sessions s ON s.id = r.session_id
-        JOIN top_sessions ts_info ON ts_info.session_id = r.session_id
-        WHERE r.rn <= %[2]d
-        ORDER BY ts_info.best_score, s.id, r.rn`,
-			filterSQL, maxExcerptsPerSession, triPenalty)
-
-		args = append(args, matchPorter)
-		args = append(args, fargs...)
+            WHERE messages_fts_tri MATCH ? %s`, srcTrigram, triPenalty, msgHint, filterSQL)
 		args = append(args, matchTri)
 		args = append(args, fargs...)
-		args = append(args, q.Limit, q.Offset)
-	} else {
-		query = fmt.Sprintf(`
-        WITH hits AS MATERIALIZED (
-            SELECT m.id AS mid, m.session_id, m.ordinal, m.role, m.ts,
-                   snippet(messages_fts, 0, '«', '»', '…', 12) AS snip,
-                   bm25(messages_fts) AS score
-            FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
-            JOIN sessions s ON s.id = m.session_id
-            WHERE messages_fts MATCH ? %s
+	}
+
+	// A message that matches both indexes appears twice in raw_hits. The
+	// session's MIN(score) is the same either way and COUNT(DISTINCT mid)
+	// counts it once, so the per-message dedupe only has to run over the
+	// hits of the sessions on this page.
+	query := fmt.Sprintf(`
+        WITH raw_hits AS MATERIALIZED (%s
         ),
         session_scores AS (
-            SELECT session_id, MIN(score) AS best_score, COUNT(*) AS match_count
-            FROM hits GROUP BY session_id
+            SELECT session_id, MIN(score) AS best_score, COUNT(DISTINCT mid) AS match_count
+            FROM raw_hits GROUP BY session_id
         ),
-        top_sessions AS (
+        top_sessions AS MATERIALIZED (
             SELECT session_id, best_score, match_count
             FROM session_scores ORDER BY best_score LIMIT ? OFFSET ?
+        ),
+        page_hits AS (
+            SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY mid ORDER BY score, src) AS drn
+                FROM raw_hits
+                WHERE session_id IN (SELECT session_id FROM top_sessions)
+            ) WHERE drn = 1
         ),
         ranked AS (
             SELECT h.*,
                    ROW_NUMBER() OVER (PARTITION BY h.session_id ORDER BY h.score) AS rn
-            FROM hits h
-            WHERE h.session_id IN (SELECT session_id FROM top_sessions)
+            FROM page_hits h
         )
         SELECT s.id, s.session_uid, s.agent,
                COALESCE(s.workspace, ''), COALESCE(s.title, ''), COALESCE(s.summary, ''),
                COALESCE(s.started_at, 0),
                ts_info.best_score, ts_info.match_count,
-               r.ordinal, r.role, COALESCE(r.ts, 0), r.snip, r.score
+               r.ordinal, r.role, COALESCE(r.ts, 0), r.score, r.mid, r.src
         FROM ranked r
         JOIN sessions s ON s.id = r.session_id
         JOIN top_sessions ts_info ON ts_info.session_id = r.session_id
         WHERE r.rn <= %d
         ORDER BY ts_info.best_score, s.id, r.rn`,
-			filterSQL, maxExcerptsPerSession)
+		rawHits, maxExcerptsPerSession)
+	args = append(args, q.Limit, q.Offset)
 
-		args = append(args, matchPorter)
-		args = append(args, fargs...)
-		args = append(args, q.Limit, q.Offset)
+	out, refs, err := scanSearchRows(tx, query, args)
+	if err != nil {
+		return nil, err
 	}
 
-	rows, err := d.Query(query, args...)
+	// Fill snippets per index, one pass each.
+	for _, idx := range []struct {
+		src   int
+		table string
+		match string
+	}{
+		{srcPorter, "messages_fts", matchPorter},
+		{srcTrigram, "messages_fts_tri", matchTri},
+	} {
+		var mids []int64
+		for _, ref := range refs {
+			if ref.src == idx.src {
+				mids = append(mids, ref.mid)
+			}
+		}
+		if len(mids) == 0 {
+			continue
+		}
+		snips, err := pageSnippets(tx, idx.table, idx.match, mids)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range refs {
+			if ref.src == idx.src {
+				out[ref.result].Excerpts[ref.excerpt].Snippet = snips[ref.mid]
+			}
+		}
+	}
+	return out, nil
+}
+
+// Values of the src column in Search's hit set: which FTS index scored
+// the hit.
+const (
+	srcPorter  = 0
+	srcTrigram = 1
+)
+
+// excerptRef points from an excerpt in Search's output back to the message
+// and index it came from, so its snippet can be filled in afterward.
+type excerptRef struct {
+	result, excerpt int
+	mid             int64
+	src             int
+}
+
+// scanSearchRows runs Search's ranking query and groups its rows into one
+// Result per session, leaving snippets empty.
+func scanSearchRows(tx *sql.Tx, query string, args []any) ([]Result, []excerptRef, error) {
+	rows, err := tx.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("search: %w", err)
+		return nil, nil, fmt.Errorf("search: %w", err)
 	}
 	defer rows.Close()
 
-	var out []Result
+	var (
+		out  []Result
+		refs []excerptRef
+	)
 	byID := map[int64]int{} // session_id -> index into out
 	for rows.Next() {
 		var (
-			r  Result
-			ex Excerpt
+			r   Result
+			ex  Excerpt
+			ref excerptRef
 		)
 		if err := rows.Scan(&r.SessionID, &r.SessionUID, &r.Agent, &r.Workspace, &r.Title, &r.Summary,
 			&r.StartedAt,
 			&r.BestScore, &r.MatchCount,
-			&ex.Ordinal, &ex.Role, &ex.TS, &ex.Snippet, &ex.Score); err != nil {
+			&ex.Ordinal, &ex.Role, &ex.TS, &ex.Score, &ref.mid, &ref.src); err != nil {
+			return nil, nil, err
+		}
+		idx, ok := byID[r.SessionID]
+		if !ok {
+			idx = len(out)
+			byID[r.SessionID] = idx
+			out = append(out, r)
+		}
+		ref.result = idx
+		ref.excerpt = len(out[idx].Excerpts)
+		out[idx].Excerpts = append(out[idx].Excerpts, ex)
+		refs = append(refs, ref)
+	}
+	return out, refs, rows.Err()
+}
+
+// pageSnippets returns snippet() text for the given message ids from one
+// FTS table, keyed by message id.
+//
+// It evaluates the MATCH once and builds a snippet only for the requested
+// rows. Asking per row with "MATCH ? AND rowid = ?" re-expands the query
+// every time, which costs about 100 ms per row for a short prefix term
+// such as app* on a large index.
+//
+// The ids are sorted and sent in batches of at most snippetBatchSize, which
+// keeps each query under SQLite's bound-parameter limit when a large
+// --limit puts many thousands of excerpts on the page.
+func pageSnippets(tx *sql.Tx, table, match string, mids []int64) (map[int64]string, error) {
+	sorted := slices.Clone(mids)
+	slices.Sort(sorted)
+	out := make(map[int64]string, len(mids))
+	for chunk := range slices.Chunk(sorted, snippetBatchSize) {
+		if err := snippetBatch(tx, table, match, chunk, out); err != nil {
 			return nil, err
 		}
-		if idx, ok := byID[r.SessionID]; ok {
-			out[idx].Excerpts = append(out[idx].Excerpts, ex)
-			continue
-		}
-		r.Excerpts = []Excerpt{ex}
-		byID[r.SessionID] = len(out)
-		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// snippetBatchSize caps the message ids per snippet query. A variable so
+// tests can force several batches.
+var snippetBatchSize = 500
+
+// snippetBatch adds snippets for one sorted batch of ids to out.
+func snippetBatch(tx *sql.Tx, table, match string, mids []int64, out map[int64]string) error {
+	args := make([]any, 0, len(mids)+3)
+	marks := make([]string, len(mids))
+	for i, id := range mids {
+		marks[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, match, mids[0], mids[len(mids)-1])
+	query := fmt.Sprintf(`
+        WITH snips AS MATERIALIZED (
+            SELECT rowid AS id,
+                   CASE WHEN rowid IN (%[2]s)
+                        THEN snippet(%[1]s, 0, '«', '»', '…', 12) END AS snip
+            FROM %[1]s
+            WHERE %[1]s MATCH ? AND rowid BETWEEN ? AND ?
+        )
+        SELECT id, snip FROM snips WHERE snip IS NOT NULL`,
+		table, strings.Join(marks, ","))
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return fmt.Errorf("search snippets: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id   int64
+			snip string
+		)
+		if err := rows.Scan(&id, &snip); err != nil {
+			return err
+		}
+		out[id] = snip
+	}
+	return rows.Err()
 }
 
 // ContextRows returns messages around a given ordinal in a session.
