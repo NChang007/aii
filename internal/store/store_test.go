@@ -93,6 +93,52 @@ func TestSearch_MatchesAndDedupes(t *testing.T) {
 	_ = sidB
 }
 
+func TestSearch_BooleanOperators(t *testing.T) {
+	db := openTestDB(t)
+	sidA := seed(t, db, &Session{
+		Agent: "claudecode", UID: "sess-a", Workspace: "repoA",
+		Title: "session a", StartedAt: 100, EndedAt: 200, SourcePath: "/tmp/a.jsonl",
+	}, []Message{{Ordinal: 1, Role: "user", TS: 100, Content: "download the archive"}})
+	sidB := seed(t, db, &Session{
+		Agent: "claudecode", UID: "sess-b", Workspace: "repoB",
+		Title: "session b", StartedAt: 300, EndedAt: 400, SourcePath: "/tmp/b.jsonl",
+	}, []Message{{Ordinal: 1, Role: "user", TS: 300, Content: "extract into scratch"}})
+	sidC := seed(t, db, &Session{
+		Agent: "claudecode", UID: "sess-c", Workspace: "repoC",
+		Title: "session c", StartedAt: 500, EndedAt: 600, SourcePath: "/tmp/c.jsonl",
+	}, []Message{{Ordinal: 1, Role: "user", TS: 500, Content: "download ab archive"}})
+
+	sessions := func(q string) map[int64]bool {
+		t.Helper()
+		results, err := db.Search(Query{Text: q})
+		if err != nil {
+			t.Fatalf("Search(%q): %v", q, err)
+		}
+		got := map[int64]bool{}
+		for _, r := range results {
+			got[r.SessionID] = true
+		}
+		return got
+	}
+
+	if got := sessions("download OR extract OR scratch OR app"); !got[sidA] || !got[sidB] {
+		t.Errorf("OR query should match both sessions, got %v", got)
+	}
+	if got := sessions("extract NOT download"); got[sidA] || !got[sidB] {
+		t.Errorf("NOT query should match only session B, got %v", got)
+	}
+	if got := sessions("OR"); len(got) != 0 {
+		t.Errorf("bare operator should match nothing, got %v", got)
+	}
+	// A short excluded term must not let the trigram branch bring it back.
+	if got := sessions("download NOT ab"); !got[sidA] || got[sidC] {
+		t.Errorf("download NOT ab should match A but not C, got %v", got)
+	}
+	if got := sessions("NOT download"); len(got) != 0 {
+		t.Errorf("leading NOT should match nothing, got %v", got)
+	}
+}
+
 func TestSearch_FiltersByAgentWorkspaceRoleTime(t *testing.T) {
 	db := openTestDB(t)
 	sidA := seed(t, db, &Session{
