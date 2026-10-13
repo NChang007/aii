@@ -14,7 +14,7 @@ If you're a human, read `README.md` instead.
 ## 1. Using `aii` as an agent
 
 `aii` is a local SQLite FTS index over your user's Claude Code / Codex
-/ Cursor / pi / opencode / Gemini CLI / GitHub Copilot Chat transcripts. You can query it to recover context the user
+/ Cursor / pi / opencode / Gemini CLI / GitHub Copilot Chat / Aider / Cline / Roo Code transcripts. You can query it to recover context the user
 expects you to "remember" — prior decisions, commands run, error
 messages seen, implementations discussed.
 
@@ -69,11 +69,11 @@ state across lines.
 <agent_code>/<short_uid>:<ordinal>    e.g.  cc/32e869ac:319
 ```
 
-- `agent_code` ∈ {`cc`, `cdx`, `cur`, `pi`, `oc`, `gem`, `cop`} (Claude Code, Codex, Cursor, pi, opencode, Gemini CLI, Copilot Chat)
-- `short_uid` = shortest unique prefix, at least 8 chars, of the stored session uid (`store.CiteUID`). For opencode the stored uid drops the `ses_` prefix; for pi it starts with the id's last group, because pi's UUIDv7 ids start with a timestamp.
+- `agent_code` ∈ {`cc`, `cdx`, `cur`, `pi`, `oc`, `gem`, `cop`, `aid`, `cln`, `roo`} (Claude Code, Codex, Cursor, pi, opencode, Gemini CLI, Copilot Chat, Aider, Cline, Roo Code)
+- `short_uid` = shortest unique prefix, at least 8 chars, of the stored session uid (`store.CiteUID`). For opencode the stored uid drops the `ses_` prefix; for pi it starts with the id's last group, because pi's UUIDv7 ids start with a timestamp. Cline and Roo Code store the task ID as is; it starts with a timestamp, so tasks started close together get longer short ids.
 - `ordinal` = 0-indexed position within the session
 
-Regex: `^(cc|cdx|cur|pi|oc|gem|cop)/[0-9A-Za-z_-]{8,}:\d+$`
+Regex: `^(cc|cdx|cur|pi|oc|gem|cop|aid|cln|roo)/[0-9A-Za-z_-]{8,}:\d+$`
 
 Lookup (`store.SessionByRef`) prefers an exact id, then an exact id ignoring ASCII case, then an id prefix ignoring ASCII case. The token's agent code scopes the lookup first, so two agents' sessions that share an id stay reachable. A ref that still matches several sessions returns `*store.AmbiguousUIDError`; never pick one of its candidates.
 
@@ -164,6 +164,8 @@ internal/source/pi           # ~/.pi/agent/sessions JSONL, offset-based
 internal/source/opencode     # opencode.db, opened read-only (mode=ro)
 internal/source/gemini       # ~/.gemini/tmp/*/chats JSONL record log
 internal/source/copilot      # VS Code chatSessions operation log / JSON
+internal/source/aider        # .aider.chat.history.md, found per workspace
+internal/source/cline        # Cline and Roo Code task storage (one parser)
 internal/indexer/        # orchestrates Sources → single writer goroutine
 internal/redact/         # regex-based secret scrubber used by the indexer
 internal/store/          # sqlite schema, hybrid FTS search, migrations
@@ -227,6 +229,8 @@ XDG_DATA_HOME=~/scratch/aii-agent-runs/opencode/home/.local/share AII_DB=/tmp/t.
 
 The script header lists its settings (model, versions, output dir). A run costs under one cent with the default model. Gemini CLI is not covered because it only speaks Google's Gemini API, and Copilot Chat cannot run outside VS Code. Trimmed recordings live in `internal/source/pi/testdata/` and `internal/source/opencode/testdata/`; they contain only the script's prompts.
 
+Aider, Cline CLI, and Roo CLI each have their own image and runner: `scripts/agent-fixtures/<tool>-run.sh <output-dir>` builds `<tool>.Dockerfile` and runs two short tasks with `<output-dir>` as the container's HOME. Pass the key as `OPENROUTER_API_KEY` or through a Docker env file named by `ENV_FILE`. The Roo CLI writes the key to `<output-dir>/.vscode-mock/global-storage/secrets.json`, so delete that file after the run. Trimmed recordings live in `internal/source/aider/testdata/recorded.md` and `internal/source/cline/testdata/recorded/`.
+
 ### Agent-mode CLI changes
 
 Any new command that emits data should:
@@ -259,7 +263,7 @@ Both `structuredContent` and a text fallback must be set. Use
 every message's content (and session title/summary) before writing,
 unless the user passes `aii index --no-redact`. `--redact-sources` also
 rewrites the JSONL transcript files in place — Cursor's SQLite store is
-skipped, as are pi, opencode, Gemini CLI, and Copilot Chat. If you add a new secret shape, keep the placeholder pure ASCII
+skipped, as are pi, opencode, Gemini CLI, Copilot Chat, Aider, Cline, and Roo Code. If you add a new secret shape, keep the placeholder pure ASCII
 and free of `"` or `\` so running the pattern over a raw JSONL line
 still leaves a parseable document.
 

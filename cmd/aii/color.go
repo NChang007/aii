@@ -69,6 +69,9 @@ func cAccent(s string) string { return sgr(s, "36") }  // cyan
 //   opencode   → warm sand on charcoal
 //   Gemini CLI → Google blue
 //   Copilot    → GitHub green
+//   Aider      → amber
+//   Cline      → cyan
+//   Roo Code   → rose
 func cAgent(agent string) string {
 	label := " " + padCenter(short(agent), 3) + " "
 	switch agent {
@@ -86,6 +89,12 @@ func cAgent(agent string) string {
 		return sgr(label, "1", "38;5;231", "48;5;33") // bold white on blue
 	case "copilot", "cop":
 		return sgr(label, "1", "38;5;231", "48;5;28") // bold white on green
+	case "aider", "aid":
+		return sgr(label, "1", "38;5;16", "48;5;178") // bold black on amber
+	case "cline", "cln":
+		return sgr(label, "1", "38;5;231", "48;5;31") // bold white on cyan
+	case "roo_code", "roo":
+		return sgr(label, "1", "38;5;231", "48;5;161") // bold white on rose
 	}
 	return sgr(label, "7")
 }
@@ -120,6 +129,12 @@ func short(a string) string {
 		return "gem"
 	case "copilot":
 		return "cop"
+	case "aider":
+		return "aid"
+	case "cline":
+		return "cln"
+	case "roo_code":
+		return "roo"
 	}
 	return a
 }
