@@ -39,6 +39,22 @@ called out under **Changed** when they happen.
   `and`/`or`/`not` are still ordinary search terms. A query that starts
   with `NOT` matches nothing instead of everything containing the
   excluded word.
+- A cite token such as `cdx/019a1b2c:12` no longer opens the wrong
+  session. Codex session ids start with a timestamp, so sessions
+  started within about a minute of each other shared the same 8-char
+  short id, and `aii show`, `aii related`, and the MCP `get_session`
+  and `related` tools opened an arbitrary one of them. Cite tokens now
+  use the shortest id prefix that matches only one session (8 chars
+  for most sessions, longer for those that would collide). An id that
+  still matches several sessions is now an error that lists each
+  match with its agent, id, start time, and title. A token you saved
+  earlier still opens its session when it is that session's full id,
+  or when no other session's id starts with the same characters.
+  The token's agent code now picks the session when two agents share
+  an id, and id matching ignores case again. `aii ui` shows the same
+  short ids, and its preview opens the session you clicked even when
+  another agent has one with the same id; so does the `aii tui`
+  preview.
 - `aii search` no longer hangs when the query contains a newline or
   carriage return.
 - Claude Code sessions keep their original title when new turns are indexed. Before, each incremental index run retitled the session with the first user message it had just read.
