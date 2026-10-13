@@ -139,6 +139,18 @@ func (s *Source) scanFile(ctx context.Context, db *store.DB, path string, full b
 	if err != nil {
 		return err
 	}
+	// On an incremental run the derived title comes from a later turn.
+	// Keep it only if the stored session has no title yet, which happens
+	// when earlier runs saw no user message.
+	if !truncate && sess.Title != "" && sess.UID != "" {
+		prior, err := db.SessionByUID(agentName, sess.UID)
+		if err != nil {
+			return fmt.Errorf("lookup session: %w", err)
+		}
+		if prior != nil && prior.Title != "" {
+			sess.Title = ""
+		}
+	}
 	if sess.UID == "" && len(msgs) == 0 {
 		// Nothing useful — still persist state so we don't re-read next time.
 		out <- source.Batch{
@@ -243,33 +255,49 @@ type contentPart struct {
 	IsError   bool            `json:"is_error"`
 }
 
-// parseDelta reads the file from its current position through EOF, parsing
-// one JSON record per line. It returns the collected session metadata,
-// message list (ordinals starting at 0), and the byte offset immediately
-// after the last complete line consumed.
+// parseDelta reads the file from its current position up to `size` (the
+// size stat'd before reading), parsing one JSON record per line. Bytes
+// appended after the stat are left for the next run. It returns the
+// collected session metadata, message list (ordinals starting at 0), and
+// the byte offset immediately after the last newline-terminated line
+// consumed. A trailing line with no newline yet is left for the next run.
 func parseDelta(ctx context.Context, r io.Reader, startOffset, size int64) (store.Session, []store.Message, int64, error) {
 	var sess store.Session
 	var msgs []store.Message
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, scannerInitial), scannerMax)
+	br := bufio.NewReaderSize(io.LimitReader(r, size-startOffset), scannerInitial)
 
-	offset := startOffset       // byte position of the NEXT unread line
+	offset := startOffset        // byte position of the NEXT unread line
 	lastCompleteOffset := offset // where to resume on next run
 
 	ordinal := 0
-	for scanner.Scan() {
+	for {
 		select {
 		case <-ctx.Done():
 			return sess, msgs, lastCompleteOffset, ctx.Err()
 		default:
 		}
 		lineStart := offset
-		line := scanner.Bytes()
-		// +1 for the \n scanner consumed. This isn't strictly correct if
-		// the final line had no newline, but Scan only returns lines that
-		// ended in a newline OR EOF; we reconcile EOF below.
-		offset += int64(len(line)) + 1
+		line, n, terminated, tooLong, err := readLine(br, scannerMax)
+		if err != nil {
+			log.Printf("claudecode: read error at offset %d: %v", lastCompleteOffset, err)
+			break
+		}
+		if n == 0 {
+			break // EOF
+		}
+		if !terminated {
+			// A line still being written: leave the offset at its start
+			// so the next run reads it whole once it's complete.
+			break
+		}
+		if tooLong {
+			log.Printf("claudecode: skipping %d-byte line over %d-byte limit at offset %d", n, scannerMax, lineStart)
+			offset += n
+			lastCompleteOffset = offset
+			continue
+		}
+		offset += n
 		lastCompleteOffset = offset
 
 		trimmed := trimSpace(line)
@@ -284,18 +312,6 @@ func parseDelta(ctx context.Context, r io.Reader, startOffset, size int64) (stor
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		// Skip forward past the broken line so we don't wedge forever,
-		// but log it.
-		log.Printf("claudecode: scanner error at offset %d: %v", lastCompleteOffset, err)
-	}
-
-	// If the file's last line has no trailing newline, Scan still returned
-	// it but we have no way to know from here. We conservatively cap the
-	// offset at `size` so SaveState never records beyond EOF.
-	if lastCompleteOffset > size {
-		lastCompleteOffset = size
-	}
 
 	// Finalize session bookkeeping.
 	if len(msgs) > 0 {
@@ -303,11 +319,56 @@ func parseDelta(ctx context.Context, r io.Reader, startOffset, size int64) (stor
 			sess.StartedAt = msgs[0].TS
 		}
 		sess.EndedAt = msgs[len(msgs)-1].TS
+		// This is the first user message in this read. On an incremental
+		// run it may be a later turn; scanFile drops it when the stored
+		// session already has a title.
 		if sess.Title == "" {
 			sess.Title = firstUserText(msgs)
 		}
 	}
 	return sess, msgs, lastCompleteOffset, nil
+}
+
+// readLine reads one '\n'-terminated line from br. It returns the line
+// without its trailing newline, the number of bytes consumed (including
+// the newline), and whether a newline terminated it. A line longer than
+// max is consumed in full but not buffered: tooLong is set and line is
+// nil. At EOF with nothing left, n is 0 and err is nil.
+func readLine(br *bufio.Reader, max int) (line []byte, n int64, terminated, tooLong bool, err error) {
+	var buf []byte
+	for {
+		chunk, rerr := br.ReadSlice('\n')
+		n += int64(len(chunk))
+		if !tooLong {
+			content := len(buf) + len(chunk)
+			if rerr == nil {
+				content-- // the newline doesn't count toward max
+			}
+			if content > max {
+				tooLong = true
+				buf = nil
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		switch {
+		case rerr == nil:
+			terminated = true
+		case errors.Is(rerr, bufio.ErrBufferFull):
+			continue
+		case errors.Is(rerr, io.EOF):
+		default:
+			return nil, n, false, tooLong, rerr
+		}
+		break
+	}
+	if tooLong {
+		return nil, n, terminated, true, nil
+	}
+	if terminated {
+		buf = buf[:len(buf)-1]
+	}
+	return buf, n, terminated, false, nil
 }
 
 // handleLine decodes a single JSONL record and returns 0, 1, or 2 messages.
