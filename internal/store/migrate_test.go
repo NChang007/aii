@@ -106,11 +106,20 @@ func TestOpenRelabelsLegacyClaudeCodeMeta(t *testing.T) {
 	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
 		t.Fatal(err)
 	}
+	stdout := seed(t, db, &Session{Agent: "claude_code", UID: "cc-3", Title: "<local-command-stdout>Set model", SourcePath: "/s.jsonl"}, []Message{
+		{Ordinal: 0, Role: "user", Content: "<local-command-stdout>Set model</local-command-stdout>"},
+		{Ordinal: 1, Role: "user", Content: "build the api"},
+	})
 	db.Close()
 	if db, err = Open(path); err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	var t3 string
+	db.QueryRow(`SELECT title FROM sessions WHERE id = ?`, stdout).Scan(&t3)
+	if t3 != "build the api" {
+		t.Errorf("slash-command-output title = %q, want the first typed prompt", t3)
+	}
 
 	rows, err := db.SessionMessages(cc)
 	if err != nil {

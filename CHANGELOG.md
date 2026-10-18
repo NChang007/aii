@@ -21,16 +21,26 @@ called out under **Changed** when they happen.
   only what you typed. `aii sessions --parent <cite>` and MCP
   `list_sessions(parent=…)` list a session's subagents; `aii digest`
   summarises them like any session.
-- `aii digest` writes a one-line summary (what was wanted, what was
-  decided or built, how it ended) for finished sessions that have none,
-  so `aii sessions`, search results and MCP `list_sessions` say what a
-  session was about without opening it. It sends only typed prompts and
-  assistant prose (head and tail past `--max-chars`) to
-  `claude -p --model haiku` by default, with tools and MCP servers off,
-  hooks off, and no transcript of its own; override with `--cmd` or
+- `aii digest` records what each finished session covered: one line per
+  task (what was done or decided, and how it ended: done, unfinished,
+  abandoned, blocked), anchored to the prompt that started it, plus a
+  one-line summary of the whole session. The model reads your prompts in
+  order, with the opening of every reply each got, and marks where you
+  switched to a different goal; follow-ups and refinements stay in their
+  task. Long sessions are split into several calls with earlier tasks as
+  context. A session resumed later gets tasks for its new prompts and a
+  refreshed summary. Slash-command lines are skipped. The default
+  command is `claude -p --model haiku` with tools, MCP servers and hooks
+  off and no transcript of its own; override with `--cmd` or
   `$AII_DIGEST_CMD`. Each call times out after 3 minutes, and a session
-  that fails 3 times is skipped so it can't block the rest. The Claude Code
-  installer's `--with-digest` runs it hourly on macOS.
+  that fails 3 times is skipped. `--session <cite>` processes one
+  session. The Claude Code installer's `--with-digest` runs it hourly on
+  macOS.
+- `aii tasks [query]` searches those task lines (relevance weighted
+  toward recent sessions, or `--sort relevance|recent`); with no query
+  it lists recent tasks, and `--session <cite>` lists one session's.
+  Each line's cite token points at the prompt where the task started.
+  MCP: `search_tasks`. The recall hook prefers task lines as pointers.
 - The Claude Code installer replaces the binary atomically, so a
   running indexer or `aii mcp` server is no longer killed mid-run. It
   then reloads aii's LaunchAgents, which macOS otherwise refuses to start
@@ -93,6 +103,8 @@ called out under **Changed** when they happen.
 - `aii index --redact-sources` prints a note and skips pi, opencode, Gemini CLI, Copilot Chat, Aider, Cline, and Roo Code, because aii does not rewrite those agents' files.
 
 ### Fixed
+- Claude Code slash-command output (`<local-command-stdout>…`) is no
+  longer used as a session title; existing titles are fixed on open.
 - A full reindex (`aii index --full`, or a transcript that shrank) no
   longer drops a session's stored summary.
 - Text Claude Code injects on your behalf — skill bodies, `/command`

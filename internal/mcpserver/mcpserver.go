@@ -128,6 +128,27 @@ func registerTools(s *server.MCPServer, db *store.DB) {
 	)
 
 	s.AddTool(
+		mcp.NewTool("search_tasks",
+			mcp.WithDescription(
+				"Search the task list recorded for each session: one line per task "+
+					"the user worked on (what was done and how it ended), anchored to "+
+					"the prompt where it started. Best first call for 'which session "+
+					"did I do X in?' or 'what did I work on in this repo?' — each hit's "+
+					"cite token goes straight to get_session. Empty query lists the "+
+					"most recent tasks; pass session to list one session's tasks."),
+			mcp.WithString("query", mcp.Description("What to look for; empty lists recent tasks.")),
+			mcp.WithString("session", mcp.Description("Only this session's tasks (uid or cite token); ignores query.")),
+			mcp.WithString("agent", mcp.Description("Agent filter: cc | codex | cursor | pi | opencode | gemini | copilot | aider | cline | roo.")),
+			mcp.WithString("workspace", mcp.Description("Exact workspace path.")),
+			mcp.WithString("since", mcp.Description("Relative duration (7d, 24h, 2w) or YYYY-MM-DD / RFC3339.")),
+			mcp.WithString("sort", mcp.DefaultString("mixed"),
+				mcp.Description("mixed (default: relevance weighted toward recent sessions) | relevance | recent.")),
+			mcp.WithNumber("limit", mcp.DefaultNumber(20), mcp.Description("Max tasks (1-200).")),
+		),
+		makeSearchTasksHandler(db),
+	)
+
+	s.AddTool(
 		mcp.NewTool("list_sessions",
 			mcp.WithDescription(
 				"Browse sessions by metadata — no full-text query needed. "+
@@ -668,4 +689,82 @@ func parentCite(db *store.DB, agent, parentUID string) string {
 		return ""
 	}
 	return ShortAgent(agent) + "/" + ShortUID(db, parentUID)
+}
+
+type searchTasksArgs struct {
+	Query     string  `json:"query"`
+	Session   string  `json:"session"`
+	Agent     string  `json:"agent"`
+	Workspace string  `json:"workspace"`
+	Since     string  `json:"since"`
+	Sort      string  `json:"sort"`
+	Limit     float64 `json:"limit"`
+}
+
+type taskItem struct {
+	Cite         string `json:"cite"`
+	Task         string `json:"task"`
+	SessionTitle string `json:"session_title,omitempty"`
+	Parent       string `json:"parent,omitempty"`
+	Workspace    string `json:"workspace,omitempty"`
+	EndedAt      int64  `json:"ended_at,omitempty"`
+}
+
+func makeSearchTasksHandler(db *store.DB) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var a searchTasksArgs
+		if err := req.BindArguments(&a); err != nil {
+			return mcp.NewToolResultErrorFromErr("bad arguments", err), nil
+		}
+		limit := int(a.Limit)
+		if limit <= 0 {
+			limit = 20
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		var hits []store.TaskHit
+		if strings.TrimSpace(a.Session) != "" {
+			s, err := db.SessionByUIDAny(resolveParent(db, a.Session))
+			if err != nil || s == nil {
+				return mcp.NewToolResultErrorFromErr("unknown session", fmt.Errorf("%q: %v", a.Session, err)), nil
+			}
+			tasks, err := db.SessionTasks(s.ID)
+			if err != nil {
+				return mcp.NewToolResultErrorFromErr("search_tasks failed", err), nil
+			}
+			for _, t := range tasks {
+				hits = append(hits, store.TaskHit{SessionUID: s.UID, Agent: s.Agent, Workspace: s.Workspace,
+					Title: s.Title, ParentUID: s.ParentUID, Ordinal: t.Ordinal, Text: t.Text, EndedAt: s.EndedAt})
+			}
+		} else {
+			since, err := parseSince(a.Since)
+			if err != nil {
+				return mcp.NewToolResultErrorFromErr("bad since", err), nil
+			}
+			hits, err = db.SearchTasks(store.TaskQuery{
+				Text: a.Query, Agent: NormalizeAgent(a.Agent), Workspace: a.Workspace,
+				SinceUnix: since, Sort: a.Sort, Limit: limit,
+			})
+			if err != nil {
+				return mcp.NewToolResultErrorFromErr("search_tasks failed", err), nil
+			}
+		}
+		out := make([]taskItem, 0, len(hits))
+		var fb strings.Builder
+		fmt.Fprintf(&fb, "%d tasks\n", len(hits))
+		for _, h := range hits {
+			it := taskItem{
+				Cite:         fmt.Sprintf("%s/%s:%d", ShortAgent(h.Agent), ShortUID(db, h.SessionUID), h.Ordinal),
+				Task:         h.Text,
+				SessionTitle: h.Title,
+				Parent:       parentCite(db, h.Agent, h.ParentUID),
+				Workspace:    h.Workspace,
+				EndedAt:      h.EndedAt,
+			}
+			out = append(out, it)
+			fmt.Fprintf(&fb, "- %s  %s  %s\n", it.Cite, store.FormatTime(h.EndedAt), oneLine(h.Text))
+		}
+		return mcp.NewToolResultStructured(map[string]any{"count": len(out), "tasks": out}, fb.String()), nil
+	}
 }

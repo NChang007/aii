@@ -58,8 +58,16 @@ def run(args):
     return [r for r in rows if live not in (r.get("cite") or "")]
 
 lines = []
-# aii ANDs the terms, so drop the leading word until something matches.
+# Task lines (written by `aii digest`) make the best pointers: one line
+# per task with its outcome, anchored to the prompt that started it.
 terms = query.split()
+while terms and not lines:
+    for r in run(["tasks", " ".join(terms), "--workspace", cwd, "--since", "90d", "--limit", "3", "--ndjson"]):
+        lines.append(f"- {r['cite']}  {r['task'][:160]}")
+    terms = terms[1:]
+# Otherwise fall back to matching messages. aii ANDs the terms, so drop
+# the leading word until something matches.
+terms = [] if lines else query.split()
 hits = []
 while terms and not hits:
     hits = run(["search", " ".join(terms), "--workspace", cwd, "--since", "30d", "--limit", "12", "--ndjson"])

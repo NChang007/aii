@@ -694,7 +694,7 @@ func firstUserText(msgs []store.Message) string {
 			t = t[:i]
 		}
 		t = truncateRunes(t, maxTitleRunes)
-		if !strings.HasPrefix(t, "<command-") {
+		if !strings.HasPrefix(t, "<command-") && !strings.HasPrefix(t, "<local-command-") {
 			return t
 		}
 		if fallback == "" {

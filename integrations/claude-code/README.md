@@ -27,10 +27,15 @@ next wake), writing a compacted `VACUUM INTO` snapshot to
 snapshots there. Claude Code deletes transcripts after
 `cleanupPeriodDays`, so the index can be the only copy of old sessions.
 
-`--with-digest` runs `aii digest --limit 20` every hour. It summarises
-finished sessions with `claude -p --model haiku` (no transcript written,
-hooks off), about 5 s and one small Haiku call per session; summaries
-show up in `aii sessions`, search results and `list_sessions`.
+`--with-digest` runs `aii digest --limit 20` every hour. For each
+finished session it sends your prompts (and the opening of each reply)
+to `claude -p --model haiku` (no transcript written, hooks, tools and
+MCP off), which marks where you switched tasks. It stores one line per
+task, anchored to the prompt that started it, and a summary of the whole
+session; resumed sessions are brought up to date. Usually one call of a
+few seconds per session, a few for very long ones. Tasks are searchable
+with `aii tasks` / MCP `search_tasks`, and the recall hook uses them as
+its first choice of pointer.
 
 The installer builds `./cmd/aii` into `~/.local/bin/aii`, backs up any
 different existing skill to `SKILL.md.bak.<timestamp>`, and adds the hook to

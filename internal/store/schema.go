@@ -68,6 +68,34 @@ CREATE TABLE IF NOT EXISTS digest_attempts (
     last_at    INTEGER
 );
 
+-- Tasks handled in a session, one line each, anchored to the message
+-- where the task starts. Written by `+"`aii digest`"+`.
+CREATE TABLE IF NOT EXISTS session_tasks (
+    id         INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ordinal    INTEGER NOT NULL,
+    task       TEXT NOT NULL,
+    UNIQUE(session_id, ordinal)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS session_tasks_fts USING fts5(
+    task,
+    content='session_tasks',
+    content_rowid='id',
+    tokenize='porter unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS session_tasks_ai AFTER INSERT ON session_tasks BEGIN
+    INSERT INTO session_tasks_fts(rowid, task) VALUES (new.id, new.task);
+END;
+CREATE TRIGGER IF NOT EXISTS session_tasks_ad AFTER DELETE ON session_tasks BEGIN
+    INSERT INTO session_tasks_fts(session_tasks_fts, rowid, task) VALUES ('delete', old.id, old.task);
+END;
+CREATE TRIGGER IF NOT EXISTS session_tasks_au AFTER UPDATE ON session_tasks BEGIN
+    INSERT INTO session_tasks_fts(session_tasks_fts, rowid, task) VALUES ('delete', old.id, old.task);
+    INSERT INTO session_tasks_fts(rowid, task) VALUES (new.id, new.task);
+END;
+
 CREATE TABLE IF NOT EXISTS index_state (
     source_path TEXT PRIMARY KEY,
     mtime_ns    INTEGER NOT NULL,

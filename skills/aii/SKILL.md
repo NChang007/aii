@@ -121,6 +121,21 @@ Each ndjson line is self-contained — no cross-line state to track.
   user (Claude Code skill bodies, command caveats, agent hand-offs).
 - `role=agent` — in a subagent's session, the task the parent agent gave it.
 
+## Task lists (start here for "which session did I…")
+
+`aii digest` records, per session, one line per task the user worked on
+(what was done, how it ended), anchored to the prompt that started it,
+plus a one-line summary of the whole session. Search those first:
+
+```sh
+aii tasks 'webhook retry'                 # matching tasks, recent first
+aii tasks --session cc/32e869ac           # everything one session covered
+```
+
+MCP: `search_tasks(query?, session?, workspace?, since?, sort?)`. Each hit's
+cite (`cc/32e869ac:319`) goes straight to `get_session`. Sessions not yet
+digested have no tasks: fall back to `search`.
+
 ## Subagents
 
 Claude Code subagent runs are indexed as their own sessions, titled

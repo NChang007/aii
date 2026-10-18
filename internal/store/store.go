@@ -83,6 +83,8 @@ func Open(path string) (*DB, error) {
 	for _, alter := range []string{
 		`ALTER TABLE sessions ADD COLUMN summary TEXT`,
 		`ALTER TABLE sessions ADD COLUMN parent_uid TEXT`,
+		// Highest message ordinal whose tasks `aii digest` has recorded.
+		`ALTER TABLE sessions ADD COLUMN tasks_through INTEGER`,
 	} {
 		if _, err := db.Exec(alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -123,7 +125,7 @@ func retitleSQL(cond string) string {
 	    SELECT ` + firstLine + `
 	      FROM messages m
 	     WHERE m.session_id = sessions.id AND m.role = 'user'
-	     ORDER BY m.content LIKE '<command-%', m.ordinal LIMIT 1), title)
+	     ORDER BY m.content LIKE '<command-%' OR m.content LIKE '<local-command-%', m.ordinal LIMIT 1), title)
 	  WHERE agent = 'claude_code' AND (` + cond + `)`
 }
 
@@ -152,6 +154,10 @@ var claudeCodeMigrations = [][]string{
 		         OR title LIKE 'Base directory for this skill:%'
 		         OR title LIKE 'Another Claude session sent a message:%'
 		         OR title LIKE '<command-%'`),
+	},
+	// 3: slash-command output (<local-command-stdout>) was used as a title.
+	{
+		retitleSQL(`title LIKE '<local-command-%'`),
 	},
 }
 

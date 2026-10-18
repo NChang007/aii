@@ -58,7 +58,9 @@ Usage:
   aii ask     <question> [--k 6] [--context 2] [--agent ..] [--since ..]
                          [--cmd "claude -p"] [--dry-run] [--show-sources]
   aii digest  [--limit 20] [--agent ..] [--since ..] [--min-messages 6]
-               [--cmd "claude -p"] [--dry-run]   # one-line session summaries
+               [--cmd "claude -p"] [--dry-run]   # task list + summary per session
+  aii tasks   [query] [--session <cite>] [--workspace DIR] [--sort mixed|relevance|recent]
+               # tasks recorded per session by aii digest
   aii backup  [--dir ~/Backups/aii] [--keep 2]   # compacted snapshot of the index
   aii related <uid> [--limit 10] [--agent ..]  # find similar sessions
   aii mcp                                       # stdio MCP server for agent use
@@ -97,6 +99,8 @@ func main() {
 		err = cmdSearch(args)
 	case "sessions", "list":
 		err = cmdSessions(args)
+	case "tasks":
+		err = cmdTasks(args)
 	case "backup":
 		err = cmdBackup(args)
 	case "digest":

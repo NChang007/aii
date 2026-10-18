@@ -1,40 +1,123 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ericmason/aii/internal/store"
 )
 
-func TestDigestTranscriptKeepsProseOnly(t *testing.T) {
-	rows := []store.Row{
-		{Ordinal: 0, Role: "system", Content: "Base directory for this skill"},
-		{Ordinal: 1, Role: "user", Content: "make the tabs smaller"},
-		{Ordinal: 2, Role: "assistant", Content: "Shrinking them.\n[tool_use name=Edit] {\"file\":\"x\"}"},
-		{Ordinal: 3, Role: "tool", Content: "[tool_result] ok"},
-		{Ordinal: 4, Role: "thinking", Content: "hmm"},
-		{Ordinal: 5, Role: "assistant", Content: "[tool_use name=Bash] {}"},
-		{Ordinal: 6, Role: "assistant", Content: "Done: tabs are 12px."},
-		{Ordinal: 7, Role: "agent", Content: "Review the diff"},
+func rowsOf(spec ...string) []store.Row {
+	var out []store.Row
+	for i := 0; i+1 < len(spec); i += 2 {
+		out = append(out, store.Row{Ordinal: len(out), Role: spec[i], Content: spec[i+1]})
 	}
-	got := digestTranscript(rows, 10000)
-	want := "user: make the tabs smaller\nassistant: Shrinking them.\nassistant: Done: tabs are 12px.\ntask: Review the diff\n"
-	if got != want {
-		t.Errorf("digestTranscript =\n%q\nwant\n%q", got, want)
+	return out
+}
+
+func TestPromptOutline(t *testing.T) {
+	rows := rowsOf(
+		"system", "Base directory for this skill",
+		"user", "<command-name>/model</command-name>",
+		"user", "make the tabs smaller",
+		"assistant", "Looking.\n[tool_use name=Edit] {}",
+		"tool", "[tool_result] ok",
+		"assistant", "Done: tabs are 12px.",
+		"user", "now fix the colors",
+		"assistant", "Colors fixed.",
+	)
+	turns := promptOutline(rows, -1)
+	if len(turns) != 2 || turns[0].Ordinal != 2 || turns[1].Ordinal != 6 {
+		t.Fatalf("turns = %+v, want prompts at 2 and 6 (slash command skipped)", turns)
+	}
+	if turns[0].Reply != "Looking. | Done: tabs are 12px." || turns[1].Reply != "Colors fixed." {
+		t.Errorf("replies = %q, %q; want every assistant message's opening in the turn", turns[0].Reply, turns[1].Reply)
+	}
+	// Resuming after ordinal 5 skips the first turn.
+	if turns = promptOutline(rows, 5); len(turns) != 1 || turns[0].Ordinal != 6 {
+		t.Errorf("resumed turns = %+v", turns)
 	}
 }
 
-func TestDigestTranscriptKeepsHeadAndTail(t *testing.T) {
-	var rows []store.Row
-	for i := 0; i < 200; i++ {
-		rows = append(rows, store.Row{Ordinal: i, Role: "user", Content: strings.Repeat("x", 50)})
+func TestBatchTurnsSplitsLongSessions(t *testing.T) {
+	var turns []turn
+	for i := 0; i < 50; i++ {
+		turns = append(turns, turn{Ordinal: i * 3, Prompt: strings.Repeat("p", 500), Reply: strings.Repeat("r", 300)})
 	}
-	rows[0].Content = "FIRST ASK"
-	rows[199].Content = "FINAL STATE"
-	got := digestTranscript(rows, 2000)
-	if len(got) > 2200 || !strings.Contains(got, "FIRST ASK") || !strings.Contains(got, "FINAL STATE") || !strings.Contains(got, "…") {
-		t.Errorf("len %d; want ≤ ~2000 chars keeping the first ask, the end, and an elision marker", len(got))
+	batches := batchTurns(turns, 10000)
+	if len(batches) < 4 {
+		t.Fatalf("got %d batches, want the 40k outline split", len(batches))
+	}
+	n := 0
+	for _, b := range batches {
+		n += len(b)
+	}
+	if n != 50 {
+		t.Errorf("batches hold %d turns, want all 50", n)
+	}
+}
+
+func TestParseTaskReply(t *testing.T) {
+	out := "Here you go:\n- [#5] Shrank kitty tabs to 12px — done\n- [#9] Fixed tab colors — unfinished\n- [#7] Bogus anchor — kept\n- no anchor line\nSUMMARY: Tabs resized and recolored; colors unfinished.\n"
+	tasks, summary := parseTaskReply(out, []int{5, 8, 9})
+	if summary != "Tabs resized and recolored; colors unfinished." {
+		t.Errorf("summary = %q", summary)
+	}
+	want := map[int]string{5: "Shrank kitty tabs to 12px — done", 9: "Fixed tab colors — unfinished"}
+	got := map[int]string{}
+	for _, tk := range tasks {
+		got[tk.Ordinal] = tk.Text
+	}
+	if !strings.HasPrefix(got[5], want[5]) || got[9] != want[9] {
+		t.Errorf("tasks = %+v", tasks)
+	}
+	// #7 isn't a prompt: it snaps to the prompt before it (#5) and joins
+	// that task rather than overwriting it.
+	if !strings.Contains(got[5], "Shrank kitty tabs") || !strings.Contains(got[5], "Bogus anchor") || got[7] != "" {
+		t.Errorf("unanchored ordinal not snapped: %+v", tasks)
+	}
+}
+
+func TestDigestSessionEndToEnd(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "aii.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var ms []store.Message
+	for i, r := range rowsOf("user", "build the queue", "assistant", "Queue built.", "user", "add retries", "assistant", "Retries added.") {
+		ms = append(ms, store.Message{Ordinal: i, Role: r.Role, Content: r.Content})
+	}
+	id, _ := db.UpsertSession(&store.Session{Agent: "claude_code", UID: "s1", EndedAt: 1, SourcePath: "/f"})
+	tx, _ := db.Begin()
+	db.InsertMessages(tx, id, ms)
+	tx.Commit()
+
+	var prompts []string
+	fake := func(p string) (string, error) {
+		prompts = append(prompts, p)
+		return "- [#0] Built the queue — done\n- [#2] Added retries — done\nSUMMARY: Queue with retries; done.", nil
+	}
+	todo, _ := db.SessionsNeedingTasks(store.TaskFilter{EndedBefore: 10, MinMessages: 2})
+	if len(todo) != 1 {
+		t.Fatalf("todo = %+v", todo)
+	}
+	n, err := digestSession(db, todo[0], fake, 12000)
+	if err != nil || n != 2 || len(prompts) != 1 {
+		t.Fatalf("digestSession = %d, %v; %d calls", n, err, len(prompts))
+	}
+	if !strings.Contains(prompts[0], "[#0] build the queue") || !strings.Contains(prompts[0], "Queue built.") {
+		t.Errorf("prompt missing the outline:\n%s", prompts[0])
+	}
+	s, _ := db.SessionByUID("claude_code", "s1")
+	tasks, _ := db.SessionTasks(id)
+	if s.Summary != "Queue with retries; done." || len(tasks) != 2 {
+		t.Errorf("summary %q, tasks %+v", s.Summary, tasks)
+	}
+	if todo, _ = db.SessionsNeedingTasks(store.TaskFilter{EndedBefore: 10, MinMessages: 2}); len(todo) != 0 {
+		t.Errorf("still needing tasks: %+v", todo)
 	}
 }
 
@@ -43,6 +126,8 @@ func TestCleanSummary(t *testing.T) {
 		"\n\n  \"Fixed tab sizes in kitty; done.\"  \nextra": "Fixed tab sizes in kitty; done.",
 		"Summary: Built the hook.":                           "Built the hook.",
 		"   ":                                                "",
+		"```\nBuilt the parser; done.\n```":                  "Built the parser; done.",
+		"\"\nFixed the users' tabs'":                         "Fixed the users' tabs'",
 	} {
 		if got := cleanSummary(in); got != want {
 			t.Errorf("cleanSummary(%q) = %q, want %q", in, got, want)
@@ -50,13 +135,13 @@ func TestCleanSummary(t *testing.T) {
 	}
 }
 
-func TestCleanSummarySkipsFencesAndKeepsApostrophe(t *testing.T) {
-	for in, want := range map[string]string{
-		"```\nBuilt the parser; done.\n```": "Built the parser; done.",
-		"\"\nFixed the users' tabs'":        "Fixed the users' tabs'",
-	} {
-		if got := cleanSummary(in); got != want {
-			t.Errorf("cleanSummary(%q) = %q, want %q", in, got, want)
-		}
+// The real command path must hand back every line of the reply.
+func TestRunDigestCmdReturnsWholeReply(t *testing.T) {
+	out, err := runDigestCmd(context.Background(), "cat", "- [#0] one\n- [#2] two\nSUMMARY: both\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tasks, sum := parseTaskReply(out, []int{0, 2}); len(tasks) != 2 || sum != "both" {
+		t.Errorf("tasks %+v, summary %q from %q", tasks, sum, out)
 	}
 }
