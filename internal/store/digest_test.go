@@ -40,3 +40,31 @@ func TestSessionsNeedingSummary(t *testing.T) {
 		t.Fatalf("summary = %q (err %v)", s.Summary, err)
 	}
 }
+
+func TestSessionsNeedingSummarySkipsHopelessOnes(t *testing.T) {
+	db := openTestDB(t)
+	var toolOnly, prose []Message
+	for i := 0; i < 6; i++ {
+		toolOnly = append(toolOnly, Message{Ordinal: i, Role: "tool", Content: "out"})
+		prose = append(prose, Message{Ordinal: i, Role: "user", Content: "m"})
+	}
+	seed(t, db, &Session{Agent: "claude_code", UID: "tools", EndedAt: 1000, SourcePath: "/a"}, toolOnly)
+	flaky := seed(t, db, &Session{Agent: "claude_code", UID: "flaky", EndedAt: 1000, SourcePath: "/b"}, prose)
+	f := SummaryFilter{EndedBefore: 5000, MinMessages: 4, Limit: 10}
+
+	got, err := db.SessionsNeedingSummary(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != flaky {
+		t.Fatalf("got %+v, want only the session with prose (tool rows don't count)", got)
+	}
+	for i := 0; i < maxDigestAttempts; i++ {
+		if err := db.RecordDigestFailure(flaky); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ = db.SessionsNeedingSummary(f); len(got) != 0 {
+		t.Fatalf("after %d failures got %d sessions, want 0", maxDigestAttempts, len(got))
+	}
+}

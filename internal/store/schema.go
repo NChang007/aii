@@ -60,6 +60,14 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts_tri(rowid, content) VALUES (new.id, new.content);
 END;
 
+-- Failed ` + "`aii digest`" + ` attempts per session, so sessions that never yield a
+-- summary stop taking the run's slots after a few tries.
+CREATE TABLE IF NOT EXISTS digest_attempts (
+    session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    last_at    INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS index_state (
     source_path TEXT PRIMARY KEY,
     mtime_ns    INTEGER NOT NULL,

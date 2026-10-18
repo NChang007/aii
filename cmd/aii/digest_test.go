@@ -48,3 +48,14 @@ func TestCleanSummary(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanSummarySkipsFencesAndKeepsApostrophe(t *testing.T) {
+	for in, want := range map[string]string{
+		"```\nBuilt the parser; done.\n```": "Built the parser; done.",
+		"\"\nFixed the users' tabs'":        "Fixed the users' tabs'",
+	} {
+		if got := cleanSummary(in); got != want {
+			t.Errorf("cleanSummary(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

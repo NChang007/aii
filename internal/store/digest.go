@@ -1,6 +1,13 @@
 package store
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+// maxDigestAttempts is how many failed summaries a session gets before
+// SessionsNeedingSummary stops offering it.
+const maxDigestAttempts = 3
 
 // SummaryFilter selects sessions that `aii digest` should summarise.
 type SummaryFilter struct {
@@ -17,9 +24,11 @@ func (d *DB) SessionsNeedingSummary(f SummaryFilter) ([]*Session, error) {
 	where := []string{
 		`COALESCE(s.summary, '') = ''`,
 		`COALESCE(s.ended_at, 0) < ?`,
-		`(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) >= ?`,
+		// Only prose counts: digest sends nothing else to the model.
+		`(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id AND m.role IN ('user','assistant')) >= ?`,
+		`COALESCE((SELECT attempts FROM digest_attempts a WHERE a.session_id = s.id), 0) < ?`,
 	}
-	args := []any{f.EndedBefore, f.MinMessages}
+	args := []any{f.EndedBefore, f.MinMessages, maxDigestAttempts}
 	if f.Agent != "" {
 		where = append(where, `s.agent = ?`)
 		args = append(args, f.Agent)
@@ -59,5 +68,13 @@ func (d *DB) SessionsNeedingSummary(f SummaryFilter) ([]*Session, error) {
 // UpsertSession only overwrites summary with a non-empty value.
 func (d *DB) SetSummary(sessionID int64, summary string) error {
 	_, err := d.Exec(`UPDATE sessions SET summary = ? WHERE id = ?`, summary, sessionID)
+	return err
+}
+
+// RecordDigestFailure counts a failed summary attempt for a session.
+func (d *DB) RecordDigestFailure(sessionID int64) error {
+	_, err := d.Exec(`INSERT INTO digest_attempts (session_id, attempts, last_at) VALUES (?, 1, ?)
+	                  ON CONFLICT(session_id) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at`,
+		sessionID, time.Now().Unix())
 	return err
 }

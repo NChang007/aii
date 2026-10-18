@@ -77,6 +77,13 @@ func Run(ctx context.Context, db *store.DB, sources []source.Source, opt Options
 
 func apply(db *store.DB, b source.Batch, verbose bool) error {
 	if b.Truncate {
+		// Summaries written by `aii digest` live only in the DB; carry
+		// one over the delete unless the source supplies its own.
+		if b.Session.Summary == "" && b.Session.UID != "" {
+			if prior, err := db.SessionByUID(b.Session.Agent, b.Session.UID); err == nil && prior != nil {
+				b.Session.Summary = prior.Summary
+			}
+		}
 		if err := db.DeleteBySourcePath(b.State.SourcePath); err != nil {
 			return fmt.Errorf("delete truncated: %w", err)
 		}

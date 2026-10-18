@@ -202,3 +202,16 @@ func TestSlashCommandTitleFallback(t *testing.T) {
 		t.Errorf("title = %q, want the slash command when nothing else exists", sess.Title)
 	}
 }
+
+func TestAITitleFromOtherSessionIgnored(t *testing.T) {
+	data := userLine("s1", "hello") +
+		`{"type":"ai-title","aiTitle":"Mine","sessionId":"s1"}` + "\n" +
+		`{"type":"ai-title","aiTitle":"Not mine","sessionId":"s2"}` + "\n"
+	sess, _, _, ai, err := parseDeltaTitle(context.Background(), strings.NewReader(data), 0, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Title != "Mine" || !ai {
+		t.Errorf("title = %q, want this session's own ai-title", sess.Title)
+	}
+}

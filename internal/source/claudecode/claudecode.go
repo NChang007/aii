@@ -415,7 +415,12 @@ func handleLine(line []byte, lineStart int64, sess *store.Session, _ int) ([]sto
 	case "assistant":
 		return assistantMessage(rec, lineStart), true
 	case "ai-title":
-		if t := strings.TrimSpace(rec.AITitle); t != "" {
+		// A resumed or forked file can hold records from another session;
+		// only take this session's own title.
+		if rec.SessionID != "" && sess.UID != "" && rec.SessionID != sess.UID {
+			return nil, true
+		}
+		if t := strings.Join(strings.Fields(rec.AITitle), " "); t != "" {
 			sess.Title = truncateRunes(t, maxTitleRunes)
 		}
 		return nil, true
