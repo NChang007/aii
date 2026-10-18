@@ -1,6 +1,7 @@
 #!/bin/sh
 # Wire aii into Claude Code as memory: build the binary from this checkout,
-# install the aii skill, and register the recall hook (UserPromptSubmit).
+# install the aii skill, and register the recall hook (UserPromptSubmit and
+# SubagentStart).
 # Safe to re-run: existing hooks are kept and nothing is added twice.
 #
 # Usage (from the repo root):
@@ -34,8 +35,10 @@ fi
 SKILL_DST="$CLAUDE_DIR/skills/aii/SKILL.md"
 mkdir -p "$(dirname "$SKILL_DST")"
 if [ -f "$SKILL_DST" ] && ! cmp -s "$ROOT/skills/aii/SKILL.md" "$SKILL_DST"; then
-    cp "$SKILL_DST" "$SKILL_DST.bak"
-    echo "backup  $SKILL_DST.bak"
+    # Timestamped so a re-run never overwrites an earlier backup.
+    BAK="$SKILL_DST.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$SKILL_DST" "$BAK"
+    echo "backup  $BAK"
 fi
 cp "$ROOT/skills/aii/SKILL.md" "$SKILL_DST"
 echo "skill   $SKILL_DST"
@@ -57,17 +60,22 @@ settings = {}
 if os.path.exists(path):
     with open(path) as f:
         settings = json.load(f)
-groups = settings.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
-if any(h.get("command") in (cmd, script) for g in groups for h in g.get("hooks", [])):
-    print("hook    already registered in " + path)
+changed = False
+for event in ("UserPromptSubmit", "SubagentStart"):
+    groups = settings.setdefault("hooks", {}).setdefault(event, [])
+    if any(h.get("command") in (cmd, script) for g in groups for h in g.get("hooks", [])):
+        print("hook    %s already registered" % event)
+        continue
+    groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+    changed = True
+    print("hook    %s registered in %s" % (event, path))
+if not changed:
     sys.exit(0)
-groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
 os.replace(tmp, path)
-print("hook    registered in " + path)
 PY
 
 # --- MCP (optional) -----------------------------------------------------

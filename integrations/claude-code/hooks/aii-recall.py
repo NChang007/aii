@@ -18,6 +18,19 @@ try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+
+# SubagentStart carries no task text to search on, so a subagent gets one
+# standing line pointing at aii instead of pointers.
+if data.get("hook_event_name") == "SubagentStart":
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "SubagentStart",
+        "additionalContext": "The user's past AI coding sessions are searchable with aii "
+                             "(MCP tools search/get_session, or the aii CLI). If your task "
+                             "depends on earlier decisions or work you have no record of, "
+                             "search there before guessing.",
+    }}))
+    sys.exit(0)
+
 prompt = data.get("prompt") or ""
 if not TRIGGER.search(prompt):
     sys.exit(0)

@@ -9,6 +9,10 @@ called out under **Changed** when they happen.
 ## [Unreleased]
 
 ### Added
+- The Claude Code installer also registers the recall hook on
+  `SubagentStart`, so subagents are told aii exists (one line; the event
+  carries no task text to search on). Skill backups are timestamped, so
+  re-running the installer never overwrites an earlier backup.
 - Claude Code sessions take their title from Claude Code's own
   `ai-title` (e.g. "Tab size reduction") when the transcript has one,
   instead of the first prompt. `--role system` (CLI and MCP) filters to
