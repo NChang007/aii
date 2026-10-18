@@ -2,28 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **This is a fork of [ericmason/aii](https://github.com/ericmason/aii)**
-> that turns aii into long-term memory for Claude Code. On top of
-> upstream it adds:
->
-> - **History that is never deleted.** Re-reads only add; sessions whose
->   transcript Claude Code has cleaned up stay in the index for good.
-> - **Task lists per session.** `aii digest` records one line per task
->   you worked on (what was done, how it ended), anchored to the prompt
->   that started it, plus a summary of the whole session. Search them
->   with `aii tasks` or MCP `search_tasks`.
-> - **Subagent transcripts**, indexed as their own sessions and linked to
->   the session that spawned them.
-> - **Recent-first search**: relevance weighted toward recent sessions.
-> - **Clean roles and titles** for Claude Code: tool output is `tool`,
->   injected text is `system`, so `--role user` is only what you typed.
-> - **Weekly backups** (`aii backup`) and a **one-command Claude Code
->   setup**: skill, recall hook, MCP server, and scheduled jobs.
->
-> Install it with the steps under [Install this fork](#install-this-fork).
-> The upstream install methods below fetch ericmason's releases, which
-> don't include these changes.
-
 `aii` indexes every conversation from your local AI coding agents into a
 SQLite FTS5 database and makes them searchable from the CLI, a minimal
 TUI, a local web UI, or — most importantly — as a tool your coding
@@ -52,7 +30,26 @@ Indexed sources:
 - **Cline** — `~/.cline/data` (Cline CLI, or `$CLINE_DATA_DIR`, or `$CLINE_DIR/data`) and the VS Code extension's `globalStorage/saoudrizwan.claude-dev`
 - **Roo Code** — the VS Code extension's `globalStorage/rooveterinaryinc.roo-cline` and the Roo CLI's `~/.vscode-mock/global-storage`
 
-## Install this fork
+## Memory for Claude Code
+
+aii is built to be long-term memory for Claude Code without loading old
+transcripts into every session:
+
+- **History is never deleted.** Indexing only adds. Sessions whose
+  transcript Claude Code has cleaned up stay in the index for good.
+- **Task lists per session.** `aii digest` records one line per task you
+  worked on (what was done, how it ended), anchored to the prompt that
+  started it, plus a summary of the whole session. Find them with
+  `aii tasks` or MCP `search_tasks`.
+- **Subagent transcripts** are indexed as their own sessions, linked to
+  the session that spawned them.
+- **Recent-first search**: relevance weighted toward recent sessions.
+- **Clean roles**: tool output is `tool`, injected text is `system`, so
+  `--role user` returns only what you typed.
+- **Weekly backups** with `aii backup`, and a **one-command setup** for the
+  skill, recall hook, MCP server and scheduled jobs.
+
+## Install
 
 Requirements: Go 1.26+ (see `go.mod`) and Python 3. The Claude Code parts also need the
 `claude` CLI on `PATH`. The scheduled jobs (`--with-digest`, `--with-backup`)
@@ -86,73 +83,6 @@ Without the Claude Code parts, just build the binary:
 ```sh
 go build -o ~/.local/bin/aii ./cmd/aii
 ```
-
-`go install github.com/NChang007/aii/...` does not work: the module path
-in `go.mod` is still upstream's, so build from a clone.
-
-## Upstream install (ericmason/aii, without this fork's changes)
-
-### One-line install (macOS / Linux)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/ericmason/aii/main/scripts/install.sh | sh
-```
-
-No Go toolchain required. This downloads the right prebuilt static
-binary for your platform from the latest
-[release](https://github.com/ericmason/aii/releases), verifies its
-SHA-256 checksum, and installs it to `~/.local/bin/aii`.
-
-Pin a version or change the target directory:
-
-```sh
-AII_VERSION=v0.5.1 curl -fsSL https://raw.githubusercontent.com/ericmason/aii/main/scripts/install.sh | sh
-AII_INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/ericmason/aii/main/scripts/install.sh | sh
-```
-
-### Manual download
-
-Every release ships prebuilt static binaries on the [releases
-page](https://github.com/ericmason/aii/releases/latest). Each archive is
-named `aii-<version>-<os>-<arch>.(tar.gz|zip)` and contains a single
-`aii` binary (`aii.exe` on Windows). Pick the one for your platform:
-
-| OS      | Apple Silicon / ARM      | Intel / x86-64           |
-|---------|--------------------------|--------------------------|
-| macOS   | `darwin-arm64` (.tar.gz) | `darwin-amd64` (.tar.gz) |
-| Linux   | `linux-arm64` (.tar.gz)  | `linux-amd64` (.tar.gz)  |
-| Windows | `windows-arm64` (.zip)   | `windows-amd64` (.zip)   |
-
-For example, on Apple Silicon macOS:
-
-```sh
-ver=v0.5.1
-curl -fsSLO https://github.com/ericmason/aii/releases/download/$ver/aii-$ver-darwin-arm64.tar.gz
-tar xzf aii-$ver-darwin-arm64.tar.gz
-mv aii-$ver-darwin-arm64/aii ~/.local/bin/
-```
-
-Each release also publishes `SHA256SUMS` if you want to verify the
-download. Make sure your install dir is on `PATH` — `~/.local/bin`
-usually is; otherwise add `export PATH="$HOME/.local/bin:$PATH"` to your
-shell rc.
-
-### From source (Go developers)
-
-```sh
-go install github.com/ericmason/aii/cmd/aii@latest
-```
-
-Or clone and build locally:
-
-```sh
-git clone https://github.com/ericmason/aii.git
-cd aii
-go build -o ~/.local/bin/aii ./cmd/aii
-```
-
-That's it. The database lives at `$AII_DB` or
-`~/.local/share/aii/aii.db`, created on first run.
 
 ## Quick start
 
@@ -503,7 +433,7 @@ teaches the agent when to search, to start from the task lists
 `get_session`), cite-token grammar, roles, subagents, ranking, and the
 query idioms that actually work. `integrations/claude-code/install.sh`
 installs it along with the recall hook (see
-[Install this fork](#install-this-fork)). To install only the skill:
+[Install](#install)). To install only the skill:
 
 ```sh
 # user-wide (all projects)

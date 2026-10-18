@@ -1,6 +1,6 @@
 ---
 name: aii
-description: Search and recall past AI coding conversations (Claude Code, Codex, Cursor, pi, opencode, Gemini CLI, GitHub Copilot Chat, Aider, Cline, Roo Code) indexed locally by aii. Use when the user says "remember when", "last time", "what did we", "how did I fix", references prior decisions/commands/errors, or asks about past work that predates the current conversation. Also use proactively before making recommendations that build on prior work.
+description: Search and recall past AI coding conversations (Claude Code incl. subagents, Codex, Cursor, pi, opencode, Gemini CLI, GitHub Copilot Chat, Aider, Cline, Roo Code) indexed locally by aii, including per-session task lists and summaries. Use when the user says "remember when", "last time", "what did we", "how did I fix", "where did we leave off", "which session did I…", "what did I work on…", references prior decisions/commands/errors, or asks about past work that predates the current conversation, and when a prompt arrives with aii pointers from the recall hook. Also use proactively before making recommendations that build on prior work.
 ---
 
 # aii — search past AI chats
@@ -10,9 +10,19 @@ Cursor, pi, opencode, Gemini CLI, GitHub Copilot Chat, Aider, Cline, and Roo Cod
 "remember" — prior decisions, commands run, error messages seen,
 implementations discussed.
 
-Prefer the MCP tools (`search`, `list_sessions`, `get_session`,
-`related`, `stats`) if they're registered. Otherwise shell out to the
-`aii` CLI — when stdout is piped, `aii` emits ndjson automatically.
+Prefer the MCP tools (`search_tasks`, `search`, `list_sessions`,
+`get_session`, `related`, `stats`) if they're registered. Otherwise shell
+out to the `aii` CLI — when stdout is piped, `aii` emits ndjson
+automatically.
+
+**History is permanent.** aii never deletes what it indexed: sessions
+stay searchable after Claude Code has cleaned up their transcripts. A
+missing transcript file never means the work is gone; search aii first.
+
+**Recall-hook pointers.** A prompt that refers to past work may arrive
+with "Possibly relevant past sessions (aii pointers…)" lines: cite
+tokens with a task or snippet. They are leads, not context: open the
+relevant one with `get_session` / `aii show` before relying on it.
 
 ## When to search
 
@@ -27,6 +37,15 @@ Don't search when:
 - It's a general programming question unrelated to the user's history.
 
 ## The chain pattern (most important)
+
+```
+search_tasks("webhook retry")    → task "cc/32e869ac:319  Added retry queue — done"
+get_session("cc/32e869ac:319")   → full messages around ordinal 319
+```
+
+Start with `search_tasks`: task lines say what each session did and how
+it ended. If it finds nothing (the session isn't digested yet, or the
+detail is too small to be a task), use `search` the same way:
 
 ```
 search("webhook retry")          → hit with cite "cc/32e869ac:319"
@@ -60,14 +79,16 @@ copy-pasteable and round-trips to `get_session` / `aii show`.
 
 | Tool             | When to call                                                    |
 |------------------|-----------------------------------------------------------------|
-| `search`         | Any "what did we…", "have I…", "how did I fix…" question        |
-| `list_sessions`  | "What was I working on last week?" — browse a time window with no full-text query |
+| `search_tasks`   | First call for "which session did I…", "did we already…", "what did I work on in this repo?" — task lines with outcomes |
+| `search`         | Any "what did we…", "have I…", "how did I fix…" question; exact errors, commands, identifiers |
+| `list_sessions`  | "What was I working on last week?" — browse a time window with no full-text query; each session carries its summary |
 | `get_session`    | After a search/list, to read exact surrounding messages         |
 | `related`        | "Find more threads on this topic" after locating one            |
 | `stats`          | Sanity check; only if you suspect the index is empty            |
 
-`search(query, agent?, workspace?, role?, since?, limit?, offset?)`
-`list_sessions(agent?, workspace?, since?, until?, limit?, offset?, order?, ended_mid_task?)`
+`search_tasks(query?, session?, agent?, workspace?, since?, sort?, limit?)`
+`search(query, agent?, workspace?, role?, since?, sort?, limit?, offset?)`
+`list_sessions(agent?, workspace?, since?, until?, limit?, offset?, order?, ended_mid_task?, parent?)`
 `get_session(session, around?, span?, from?, to?, role?, max_msg_chars?)`
 `related(session, limit?, agent?, since?)`
 
@@ -79,8 +100,11 @@ unfinished?" questions.
 ## CLI fallback
 
 ```sh
-aii search 'webhook retry' --limit 5 --max-bytes 8000
-aii sessions --since 7d --agent cc                    # browse a time window
+aii tasks 'webhook retry'                             # task lines, recent first
+aii tasks --session cc/32e869ac                       # everything one session covered
+aii search 'webhook retry' --limit 5 --max-bytes 8000 # --sort mixed|relevance|recent
+aii sessions --since 7d --agent cc                    # browse a time window (with summaries)
+aii sessions --parent cc/32e869ac                     # a session's subagent runs
 aii sessions --since 7d --ended-mid-task              # only interrupted threads
 aii show cc/32e869ac:319 --span 3 --max-msg-chars 2000 --format ndjson
 aii related 32e869ac --limit 5
@@ -123,9 +147,10 @@ Each ndjson line is self-contained — no cross-line state to track.
 
 ## Task lists (start here for "which session did I…")
 
-`aii digest` records, per session, one line per task the user worked on
-(what was done, how it ended), anchored to the prompt that started it,
-plus a one-line summary of the whole session. Search those first:
+`aii digest` (run hourly in the background) records, per session, one
+line per task the user worked on (what was done, how it ended: done,
+unfinished, abandoned, blocked), anchored to the prompt that started
+it, plus a one-line summary of the whole session. Search those first:
 
 ```sh
 aii tasks 'webhook retry'                 # matching tasks, recent first
@@ -134,7 +159,14 @@ aii tasks --session cc/32e869ac           # everything one session covered
 
 MCP: `search_tasks(query?, session?, workspace?, since?, sort?)`. Each hit's
 cite (`cc/32e869ac:319`) goes straight to `get_session`. Sessions not yet
-digested have no tasks: fall back to `search`.
+digested (active, or finished less than an hour ago) have no tasks: fall
+back to `search`. If the user wants one now, `aii digest --session <cite>`
+records it (one small LLM call, needs the `claude` CLI).
+
+"What did I work on this week?" → `aii tasks --since 7d` (or
+`search_tasks(since="7d")` with no query) lists recent tasks with outcomes.
+"What's still unfinished?" → look for "— unfinished" / "— blocked" in
+task lines, and `list_sessions(ended_mid_task=true)`.
 
 ## Subagents
 
