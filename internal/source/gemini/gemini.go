@@ -156,15 +156,11 @@ func scanFile(ctx context.Context, db *store.DB, root, path string, full bool, o
 	}
 
 	if !truncate {
-		// Gemini CLI rewrites an older .json session as .jsonl. If the
-		// session was indexed from another file, replace those rows
-		// instead of adding to them.
+		// The app rewrites an older .json session as .jsonl. If the session
+		// was indexed from another file, re-read it whole so the indexer
+		// reconciles it with the stored rows instead of adding to them.
 		if existing, err := db.SessionByUID(agentName, conv.SessionID); err == nil && existing != nil && existing.SourcePath != abs {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case out <- source.Batch{State: store.IndexState{SourcePath: existing.SourcePath}, Truncate: true}:
-			}
+			truncate = true
 		}
 	}
 

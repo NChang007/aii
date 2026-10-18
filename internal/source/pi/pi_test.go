@@ -169,16 +169,18 @@ func TestIncrementalAppendNoDuplicates(t *testing.T) {
 	}
 }
 
-func TestShrunkFileIsReread(t *testing.T) {
+// Indexing never loses history: a shrunk session file keeps its rows.
+func TestShrunkFileKeepsRows(t *testing.T) {
 	root, path := setup(t)
 	db := openDB(t)
 	src := &Source{Root: root}
 	writeFile(t, path, piHeader+piUser+piAsst+piResult, 1)
 	runIndex(t, db, src, false)
+	_, before := messages(t, db, uid)
 	writeFile(t, path, piHeader+piUser, 2)
 	runIndex(t, db, src, false)
-	if _, rows := messages(t, db, uid); len(rows) != 1 {
-		t.Fatalf("rows after shrink = %d, want 1", len(rows))
+	if _, rows := messages(t, db, uid); len(rows) != len(before) {
+		t.Fatalf("rows after shrink = %d, want all %d kept", len(rows), len(before))
 	}
 }
 

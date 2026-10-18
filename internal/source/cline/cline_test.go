@@ -273,14 +273,15 @@ func TestAppendAndRewrite(t *testing.T) {
 	}
 
 	// The user edits the first message and the extension drops the rest:
-	// the task is re-indexed from scratch instead of keeping stale rows.
+	// indexing never loses history, so the earlier turns stay and the new
+	// ones are added after them.
 	rewrite(t, path, []map[string]any{
 		{"role": "user", "content": "<user_message>\nWhy does the parser accept 2026-02-28?\n</user_message>", "ts": 1761000200000},
 		{"role": "assistant", "content": "Because February 28 is a valid date.", "ts": 1761000201000},
 	})
 	run(t, db, false, src)
 	_, rs = sessionRows(t, db, "roo_code", rooTask)
-	if len(rs) != 2 || rs[0].Content != "Why does the parser accept 2026-02-28?" {
+	if len(rs) != 10 || rs[0].Content != "Why does the date parser reject 2026-02-30?" || rs[8].Content != "Why does the parser accept 2026-02-28?" {
 		t.Errorf("after rewrite: %+v", rs)
 	}
 }

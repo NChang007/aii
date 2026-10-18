@@ -76,17 +76,16 @@ func Run(ctx context.Context, db *store.DB, sources []source.Source, opt Options
 }
 
 func apply(db *store.DB, b source.Batch, verbose bool) error {
-	if b.Truncate {
-		// Summaries written by `aii digest` live only in the DB; carry
-		// one over the delete unless the source supplies its own.
-		if b.Session.Summary == "" && b.Session.UID != "" {
-			if prior, err := db.SessionByUID(b.Session.Agent, b.Session.UID); err == nil && prior != nil {
-				b.Session.Summary = prior.Summary
-			}
+	// Indexing never loses history: a truncating batch (a --full re-read,
+	// or a source that shrank or was rewritten) is reconciled with what is
+	// stored for that session instead of deleting the file's sessions. The
+	// index outlives the transcripts it was built from.
+	if b.Truncate && b.Session.UID != "" {
+		merged, err := mergeTruncated(db, b)
+		if err != nil {
+			return fmt.Errorf("merge re-read: %w", err)
 		}
-		if err := db.DeleteBySourcePath(b.State.SourcePath); err != nil {
-			return fmt.Errorf("delete truncated: %w", err)
-		}
+		b.Messages = merged
 	}
 
 	// Some batches carry only a state update (e.g. codex history scan
@@ -121,6 +120,47 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 			b.Session.Agent, shortUID(b.Session.UID), len(b.Messages), b.Session.Workspace)
 	}
 	return nil
+}
+
+// mergeTruncated reconciles a re-read of a whole session with the rows
+// already stored for it and returns the messages to insert.
+//
+// A re-read at least as long as what is stored is the source's current
+// version of the session: it replaces the stored messages, so edits and
+// parser fixes apply and nothing is duplicated. A shorter re-read means
+// the source lost content (a shrunk or rewritten file): every stored row
+// stays, and only messages whose content isn't stored yet are appended.
+func mergeTruncated(db *store.DB, b source.Batch) ([]store.Message, error) {
+	prior, err := db.SessionByUID(b.Session.Agent, b.Session.UID)
+	if err != nil || prior == nil {
+		return b.Messages, err
+	}
+	stored, err := db.SessionMessages(prior.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(b.Messages) >= len(stored) {
+		return b.Messages, db.DeleteSessionMessages(prior.ID)
+	}
+	seen := make(map[string]bool, len(stored))
+	next := 0
+	for _, r := range stored {
+		seen[r.Content] = true
+		if r.Ordinal >= next {
+			next = r.Ordinal + 1
+		}
+	}
+	var out []store.Message
+	for _, m := range b.Messages {
+		if seen[m.Content] {
+			continue
+		}
+		seen[m.Content] = true
+		m.Ordinal = next
+		next++
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 // redactBatch scrubs secrets out of every user-visible text field before

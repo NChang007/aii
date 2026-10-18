@@ -192,16 +192,11 @@ func scanFile(ctx context.Context, db *store.DB, file string, full bool, out cha
 	}
 
 	if !truncate {
-		// VS Code rewrites <id>.json as <id>.jsonl when it migrates a
-		// session. If the session was indexed from another file, replace
-		// those rows instead of adding to them.
+		// The app rewrites an older .json session as .jsonl. If the session
+		// was indexed from another file, re-read it whole so the indexer
+		// reconciles it with the stored rows instead of adding to them.
 		if existing, err := db.SessionByUID(agentName, sess.SessionID); err == nil && existing != nil && existing.SourcePath != abs {
-			b := source.Batch{State: store.IndexState{SourcePath: existing.SourcePath}, Truncate: true}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case out <- b:
-			}
+			truncate = true
 		}
 	}
 

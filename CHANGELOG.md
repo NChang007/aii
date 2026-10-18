@@ -57,6 +57,14 @@ called out under **Changed** when they happen.
 - Roo Code tasks are now indexed, from the VS Code extension (`globalStorage/rooveterinaryinc.roo-cline`) and the Roo CLI (`~/.vscode-mock/global-storage`). Filter with `--source roo` / `--agent roo`; cite tokens use `roo/`.
 
 ### Changed
+- Indexing never loses history. `aii index --full`, or a transcript
+  that shrank or was rewritten, no longer deletes the file's sessions: a
+  re-read at least as long as what is stored replaces that session's
+  messages (edits and parser fixes apply, nothing is duplicated), and a
+  shorter one keeps every stored message and adds only content not
+  already stored. Sessions whose transcript is gone are never touched.
+  Copilot and Gemini sessions migrated from `.json` to `.jsonl` are
+  re-read in place instead of deleted and re-added.
 - README install instructions now lead with the one-line installer and
   manual prebuilt-binary download (with a per-platform asset table);
   `go install` / `go build` are now documented as the "from source"

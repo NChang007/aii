@@ -379,7 +379,15 @@ func (d *DB) SaveState(s IndexState) error {
 	return err
 }
 
-// DeleteBySourcePath removes sessions & state for a given file (used on truncation).
+// DeleteSessionMessages removes one session's messages (not the session)
+// so a fresh re-read of it can take their place.
+func (d *DB) DeleteSessionMessages(sessionID int64) error {
+	_, err := d.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID)
+	return err
+}
+
+// DeleteBySourcePath removes sessions & state for a given file. The
+// indexer no longer calls it: indexing only adds.
 func (d *DB) DeleteBySourcePath(path string) error {
 	tx, err := d.Begin()
 	if err != nil {

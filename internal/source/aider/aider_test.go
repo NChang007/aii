@@ -185,15 +185,18 @@ func TestIndexIsIncrementalAndIdempotent(t *testing.T) {
 	}
 }
 
-func TestShrunkFileDropsOldSessions(t *testing.T) {
+// Indexing never loses history: a shrunk history file keeps every
+// stored session and adds only the new turns.
+func TestShrunkFileKeepsOldSessions(t *testing.T) {
 	h := newHarness(t)
 	h.write(readFixture(t))
 	h.index(false)
+	sessions, messages := h.sessions(), h.messages()
 
 	h.write([]byte("\n# aider chat started at 2026-04-01 12:00:00\n\n#### Start over.  \n\nOK.\n"))
 	h.index(false)
-	if h.sessions() != 1 || h.messages() != 2 {
-		t.Fatalf("after shrink: %d sessions, %d messages", h.sessions(), h.messages())
+	if h.sessions() != sessions || h.messages() != messages+2 {
+		t.Fatalf("after shrink: %d sessions, %d messages; want %d, %d", h.sessions(), h.messages(), sessions, messages+2)
 	}
 }
 
@@ -394,6 +397,8 @@ func TestSymlinkedWorkspaceIndexedOnce(t *testing.T) {
 
 // A history file deleted and recreated larger has different bytes at
 // the saved offset; it must be re-read from the start, not from there.
+// The old sessions stay. The new first session shares the old first
+// session's id (path + header offset), so its turns are added to it.
 func TestRecreatedLargerFileIsReread(t *testing.T) {
 	h := newHarness(t)
 	fixture := readFixture(t)
@@ -402,10 +407,11 @@ func TestRecreatedLargerFileIsReread(t *testing.T) {
 
 	fresh := "\n# aider chat started at 2026-05-01 09:00:00\n\n#### " +
 		strings.Repeat("Rewrite everything. ", len(fixture)/10) + " \n\nOK.\n"
+	sessions, messages := h.sessions(), h.messages()
 	h.write([]byte(fresh))
 	h.index(false)
-	if h.sessions() != 1 || h.messages() != 2 {
-		t.Errorf("after recreate: %d sessions, %d messages; want 1, 2", h.sessions(), h.messages())
+	if h.sessions() != sessions || h.messages() != messages+2 {
+		t.Errorf("after recreate: %d sessions, %d messages; want %d, %d", h.sessions(), h.messages(), sessions, messages+2)
 	}
 }
 
