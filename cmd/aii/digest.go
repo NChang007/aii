@@ -28,13 +28,21 @@ const digestCallTimeout = 3 * time.Minute
 
 const taskInstructions = `You are indexing one AI coding session so the user can later find what was done in it.
 Below are the user's prompts in order, each tagged [#N] with its message number and followed by the start of the final reply it got.
-Group consecutive prompts into tasks: a new task starts only where the user switched to a different goal. Follow-ups, refinements, corrections and short replies like "yes", "do it" or "fix that" continue the current task. List the tasks a person would name when asked what the session covered: usually 1 to 8, more only for a session that truly moved between many unrelated goals.
+Group consecutive prompts into tasks: a new task starts only where the user switched to a different goal. Follow-ups, refinements, corrections and short replies like "yes", "do it" or "fix that" continue the current task. List the tasks a person would name when asked what the session covered: one line per distinct goal in these prompts, none left out. A whole session typically has 1 to 8. Every prompt belongs to exactly one task, so the first line is for the first prompt listed.
 For each task write one line: "- [#N] <what was done or decided, at most 20 words> — <outcome: done, unfinished, abandoned, or blocked>", where #N is the prompt that started the task.
 %s
 Reply with the lines only: no preamble, no markdown beyond the leading "- ".
 `
 
 const summaryInstruction = `Then write one last line "SUMMARY: <at most 25 words: the overall goal, what got done, how the session ended>" covering the whole session, including any earlier tasks listed below.`
+
+// summaryOnly asks for the summary alone, from the task list, when a
+// reply didn't include one.
+const summaryOnly = `Below is the list of tasks handled in one AI coding session, in order, each with its outcome.
+Write one line "SUMMARY: <at most 25 words: the overall goal, what got done, how the session ended>". Reply with that line only.
+
+--- tasks ---
+`
 
 // cmdDigest records, for finished sessions, the tasks handled in them
 // (one line each, anchored to the prompt that started it) and a one-line
@@ -76,6 +84,10 @@ func cmdDigest(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(todo) == 0 {
+		if *session != "" {
+			fmt.Fprintf(os.Stderr, "aii digest: %s: nothing to do (unknown session, written to in the last %s, no new prompts, or failed %d times)\n", *session, *idle, 3)
+			return nil
+		}
 		fmt.Fprintln(os.Stderr, "aii digest: nothing to do")
 		return nil
 	}
@@ -96,10 +108,10 @@ func cmdDigest(ctx context.Context, args []string) error {
 			fmt.Printf("%s  %s\n", cite, s.Title)
 			if !printed {
 				printed = true
-				_, _ = digestSession(db, s, func(p string) (string, error) {
+				_, _ = digestSessionOpts(db, s, func(p string) (string, error) {
 					fmt.Fprintf(os.Stderr, "--- first prompt ---\n%s\n--- end ---\n", p)
 					return "", errDryRun
-				}, *maxChars)
+				}, *maxChars, true)
 			}
 			continue
 		}
@@ -246,6 +258,15 @@ func batchTurns(turns []turn, maxChars int) [][]turn {
 // also writes the summary, given every task so far as context. It
 // returns how many tasks were added.
 func digestSession(db *store.DB, s *store.TaskSession, run func(string) (string, error), maxChars int) (int, error) {
+	return digestSessionOpts(db, s, run, maxChars, false)
+}
+
+// digestSessionOpts is digestSession; with dry set it never writes.
+//
+// Each batch's tasks are saved as soon as its call succeeds, with
+// tasks_through moved to just before the next batch, so a failure later
+// on keeps the finished batches and the next run resumes after them.
+func digestSessionOpts(db *store.DB, s *store.TaskSession, run func(string) (string, error), maxChars int, dry bool) (int, error) {
 	rows, err := db.SessionMessages(s.ID)
 	if err != nil {
 		return 0, err
@@ -256,6 +277,9 @@ func digestSession(db *store.DB, s *store.TaskSession, run func(string) (string,
 	through := rows[len(rows)-1].Ordinal
 	turns := promptOutline(rows, s.TasksThrough)
 	if len(turns) == 0 {
+		if dry {
+			return 0, errDryRun
+		}
 		// Only replies were added since the last run: nothing to list.
 		return 0, db.SaveTasks(s.ID, nil, through, "")
 	}
@@ -295,34 +319,54 @@ func digestSession(db *store.DB, s *store.TaskSession, run func(string) (string,
 		}
 		out, err := run(b.String())
 		if err != nil {
-			return 0, err
+			return len(added), err
 		}
 		tasks, sum := parseTaskReply(out, ords)
 		if len(tasks) == 0 {
-			return 0, fmt.Errorf("no task lines in the reply for part %d of %d", i+1, len(batches))
+			return len(added), fmt.Errorf("no task lines in the reply for part %d of %d", i+1, len(batches))
 		}
 		added = append(added, tasks...)
-		if last {
+		batchThrough := through
+		if !last {
+			batchThrough = batches[i+1][0].Ordinal - 1
+		} else {
 			summary = sum
+			if summary == "" {
+				// One follow-up for the summary alone; keep the old one if
+				// that fails too.
+				var tl strings.Builder
+				tl.WriteString(summaryOnly)
+				for _, t := range append(append([]store.Task{}, prior...), added...) {
+					fmt.Fprintf(&tl, "- %s\n", t.Text)
+				}
+				if out, err := run(tl.String()); err == nil {
+					_, summary = parseTaskReply(out, ords)
+				}
+			}
+		}
+		if err := db.SaveTasks(s.ID, tasks, batchThrough, summary); err != nil {
+			return len(added), err
 		}
 	}
-	return len(added), db.SaveTasks(s.ID, added, through, summary)
+	return len(added), db.ClearDigestFailures(s.ID)
 }
 
-var taskLine = regexp.MustCompile(`^\s*[-*•]\s*\[#(\d+)\]\s*(.+?)\s*$`)
+var taskLine = regexp.MustCompile(`^\s*(?:[-*•]|\d+[.)])?\s*\[#(\d+)\]\s*(.+?)\s*$`)
 
-// parseTaskReply reads "- [#N] task" lines and a "SUMMARY:" line. N must
-// be one of the batch's prompt ordinals; any other number snaps to the
-// prompt before it, and a task that lands on an ordinal already taken
-// is joined to that task instead of replacing it.
+// parseTaskReply reads "[#N] task" lines (bulleted, numbered or bare)
+// and a "SUMMARY:" line (any case, markdown emphasis ignored). N should
+// be one of the batch's prompt ordinals: a number between them snaps to
+// the prompt before it, and one before the batch is an echo of an
+// earlier task and is dropped. A task that lands on an ordinal already
+// taken is joined to that task instead of replacing it.
 func parseTaskReply(out string, ords []int) ([]store.Task, string) {
 	var tasks []store.Task
 	byOrd := map[int]int{}
 	summary := ""
 	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if rest, ok := strings.CutPrefix(trimmed, "SUMMARY:"); ok {
-			summary = cleanSummary(rest)
+		plain := strings.TrimSpace(strings.ReplaceAll(line, "**", ""))
+		if len(plain) >= 8 && strings.EqualFold(plain[:8], "summary:") {
+			summary = cleanSummary(plain[8:])
 			continue
 		}
 		m := taskLine.FindStringSubmatch(line)
@@ -330,6 +374,9 @@ func parseTaskReply(out string, ords []int) ([]store.Task, string) {
 			continue
 		}
 		n, _ := strconv.Atoi(m[1])
+		if n < ords[0] {
+			continue
+		}
 		ord := ords[0]
 		for _, o := range ords {
 			if o <= n {

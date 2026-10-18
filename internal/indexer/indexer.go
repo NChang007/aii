@@ -81,10 +81,10 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 	// or a source that shrank or was rewritten) is reconciled with what is
 	// stored for that session instead of deleting the file's sessions. The
 	// index outlives the transcripts it was built from.
-	replace := false
+	replace, renumbered := false, false
 	if b.Truncate && b.Session.UID != "" {
 		var err error
-		b.Messages, replace, err = planTruncated(db, b)
+		b.Messages, replace, renumbered, err = planTruncated(db, b)
 		if err != nil {
 			return fmt.Errorf("merge re-read: %w", err)
 		}
@@ -112,6 +112,14 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 			tx.Rollback()
 			return fmt.Errorf("replace messages: %w", err)
 		}
+		// Task lines point at message ordinals; if those moved, drop the
+		// tasks so the next digest rebuilds them against the new ones.
+		if renumbered {
+			if err := db.ResetTasks(tx, id); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("reset tasks: %w", err)
+			}
+		}
 	}
 	if err := db.InsertMessages(tx, id, b.Messages); err != nil {
 		tx.Rollback()
@@ -133,8 +141,9 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 }
 
 // planTruncated reconciles a re-read of a whole session with the rows
-// already stored for it. It returns the messages to insert and whether
-// they replace the stored ones.
+// already stored for it. It returns the messages to insert, whether they
+// replace the stored ones, and whether that replacement moves any stored
+// message to a different ordinal.
 //
 // When every stored message is still in the re-read (counting repeats,
 // ignoring role; a message that was still being written counts if the
@@ -144,21 +153,31 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 // content (an edit, a regenerated reply, a shrunk or rewritten file):
 // every stored row stays, and only re-read messages not already stored
 // are appended after them.
-func planTruncated(db *store.DB, b source.Batch) ([]store.Message, bool, error) {
+func planTruncated(db *store.DB, b source.Batch) (msgs []store.Message, replace, renumbered bool, err error) {
 	prior, err := db.SessionByUID(b.Session.Agent, b.Session.UID)
 	if err != nil || prior == nil {
-		return b.Messages, false, err
+		return b.Messages, false, false, err
 	}
 	stored, err := db.SessionMessages(prior.ID)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if len(stored) == 0 {
-		return b.Messages, false, nil
+		return b.Messages, false, false, nil
 	}
 
 	if covers(b.Messages, stored) {
-		return b.Messages, true, nil
+		at := make(map[int]string, len(b.Messages))
+		for _, m := range b.Messages {
+			at[m.Ordinal] = m.Content
+		}
+		for _, r := range stored {
+			if at[r.Ordinal] != r.Content {
+				renumbered = true
+				break
+			}
+		}
+		return b.Messages, true, renumbered, nil
 	}
 
 	have := make(map[string]int, len(stored))
@@ -179,7 +198,7 @@ func planTruncated(db *store.DB, b source.Batch) ([]store.Message, bool, error) 
 		next++
 		out = append(out, m)
 	}
-	return out, false, nil
+	return out, false, false, nil
 }
 
 // covers reports whether every stored message appears in the re-read,

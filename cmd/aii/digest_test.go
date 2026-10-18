@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,5 +144,107 @@ func TestRunDigestCmdReturnsWholeReply(t *testing.T) {
 	}
 	if tasks, sum := parseTaskReply(out, []int{0, 2}); len(tasks) != 2 || sum != "both" {
 		t.Errorf("tasks %+v, summary %q from %q", tasks, sum, out)
+	}
+}
+
+func newDigestDB(t *testing.T, spec ...string) (*store.DB, int64) {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "aii.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	var ms []store.Message
+	for i, r := range rowsOf(spec...) {
+		ms = append(ms, store.Message{Ordinal: i, Role: r.Role, Content: r.Content})
+	}
+	id, _ := db.UpsertSession(&store.Session{Agent: "claude_code", UID: "s1", EndedAt: 1, SourcePath: "/f"})
+	tx, _ := db.Begin()
+	db.InsertMessages(tx, id, ms)
+	tx.Commit()
+	return db, id
+}
+
+func needing(t *testing.T, db *store.DB) []*store.TaskSession {
+	t.Helper()
+	todo, err := db.SessionsNeedingTasks(store.TaskFilter{EndedBefore: 10, MinMessages: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return todo
+}
+
+// When a later call fails, tasks from the calls before it are kept and
+// only the rest is retried.
+func TestDigestKeepsCompletedBatches(t *testing.T) {
+	long := strings.Repeat("x", 400)
+	db, id := newDigestDB(t, "user", "a "+long, "assistant", "A.", "user", "b "+long, "assistant", "B.")
+	calls := 0
+	failSecond := func(p string) (string, error) {
+		calls++
+		if calls == 2 {
+			return "", errors.New("timeout")
+		}
+		return "- [#0] Did a — done", nil
+	}
+	if _, err := digestSession(db, needing(t, db)[0], failSecond, 500); err == nil {
+		t.Fatal("want the second call's error")
+	}
+	tasks, _ := db.SessionTasks(id)
+	todo := needing(t, db)
+	if len(tasks) != 1 || len(todo) != 1 || todo[0].TasksThrough != 1 {
+		t.Fatalf("tasks %+v, todo %+v; want batch 1 saved and only prompt #2 left", tasks, todo)
+	}
+	ok := func(p string) (string, error) {
+		if strings.Contains(p, "[#0] a") {
+			t.Errorf("retry re-sent the finished batch")
+		}
+		return "- [#2] Did b — done\nSUMMARY: a and b.", nil
+	}
+	if _, err := digestSession(db, todo[0], ok, 500); err != nil {
+		t.Fatal(err)
+	}
+	if tasks, _ = db.SessionTasks(id); len(tasks) != 2 {
+		t.Errorf("tasks = %+v", tasks)
+	}
+}
+
+// A reply without a usable SUMMARY line gets one follow-up call for it.
+func TestDigestAsksAgainForMissingSummary(t *testing.T) {
+	db, _ := newDigestDB(t, "user", "build it", "assistant", "Built.")
+	var prompts []string
+	run := func(p string) (string, error) {
+		prompts = append(prompts, p)
+		if len(prompts) == 1 {
+			return "- [#0] Built it — done", nil
+		}
+		return "**Summary:** Built it; done.", nil
+	}
+	if _, err := digestSession(db, needing(t, db)[0], run, 12000); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := db.SessionByUID("claude_code", "s1")
+	if len(prompts) != 2 || s.Summary != "Built it; done." {
+		t.Errorf("%d calls, summary %q", len(prompts), s.Summary)
+	}
+}
+
+func TestParseTaskReplyFormats(t *testing.T) {
+	out := "1. [#4] numbered — done\n[#6] no dash — done\n- [#1] echoed earlier task — done\n**SUMMARY:** fine."
+	tasks, sum := parseTaskReply(out, []int{4, 6})
+	if len(tasks) != 2 || tasks[0].Ordinal != 4 || tasks[1].Ordinal != 6 || sum != "fine." {
+		t.Errorf("tasks %+v, summary %q; want numbered and dashless lines kept, the earlier-task echo dropped", tasks, sum)
+	}
+}
+
+// --dry-run must not write: not even for a session with no new prompts.
+func TestDigestDryRunWritesNothing(t *testing.T) {
+	db, id := newDigestDB(t, "assistant", "only a reply")
+	s := &store.TaskSession{Session: store.Session{ID: id, Agent: "claude_code", UID: "s1"}, TasksThrough: -1}
+	if _, err := digestSessionOpts(db, s, func(string) (string, error) { return "", errDryRun }, 12000, true); err != nil && !errors.Is(err, errDryRun) {
+		t.Fatal(err)
+	}
+	if todo, _ := db.SessionsNeedingTasks(store.TaskFilter{EndedBefore: 10, MinMessages: 0}); len(todo) != 1 || todo[0].TasksThrough != -1 {
+		t.Errorf("dry run advanced tasks_through: %+v", todo)
 	}
 }

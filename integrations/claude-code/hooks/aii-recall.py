@@ -63,7 +63,8 @@ lines = []
 terms = query.split()
 while terms and not lines:
     for r in run(["tasks", " ".join(terms), "--workspace", cwd, "--since", "90d", "--limit", "3", "--ndjson"]):
-        lines.append(f"- {r['cite']}  {r['task'][:160]}")
+        if r.get("cite") and r.get("task"):
+            lines.append(f"- {r['cite']}  {r['task'][:160]}")
     terms = terms[1:]
 # Otherwise fall back to matching messages. aii ANDs the terms, so drop
 # the leading word until something matches.

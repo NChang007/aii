@@ -13,6 +13,13 @@ func (d *DB) SetSummary(sessionID int64, summary string) error {
 	return err
 }
 
+// ClearDigestFailures resets a session's failure count after a digest
+// succeeds, so failures months apart don't add up to the cap.
+func (d *DB) ClearDigestFailures(sessionID int64) error {
+	_, err := d.Exec(`DELETE FROM digest_attempts WHERE session_id = ?`, sessionID)
+	return err
+}
+
 // RecordDigestFailure counts a failed digest attempt for a session.
 func (d *DB) RecordDigestFailure(sessionID int64) error {
 	_, err := d.Exec(`INSERT INTO digest_attempts (session_id, attempts, last_at) VALUES (?, 1, ?)

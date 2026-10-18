@@ -174,3 +174,32 @@ func TestMergeKeepsRepeatedMessages(t *testing.T) {
 		t.Fatalf("after merge = %s", got)
 	}
 }
+
+// A replacing re-read that moves messages to other ordinals drops the
+// session's task lines (their anchors no longer hold) so the next digest
+// rebuilds them; one that keeps every ordinal leaves them alone.
+func TestRenumberingReplaceResetsTasks(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "aii.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	batch := func(m []store.Message) source.Batch {
+		return source.Batch{
+			Session:  store.Session{Agent: "claude_code", UID: "s1", SourcePath: "/f.jsonl"},
+			Messages: m, State: store.IndexState{SourcePath: "/f.jsonl"}, Truncate: true,
+		}
+	}
+	apply(db, batch(msgs("a", "b")), false)
+	s, _ := db.SessionByUID("claude_code", "s1")
+	db.SaveTasks(s.ID, []store.Task{{Ordinal: 1, Text: "did b"}}, 1, "")
+
+	apply(db, batch(msgs("a", "b", "c")), false) // same ordinals, one more
+	if tasks, _ := db.SessionTasks(s.ID); len(tasks) != 1 {
+		t.Fatalf("append-style replace dropped tasks: %+v", tasks)
+	}
+	apply(db, batch(msgs("a", "new", "b", "c")), false) // b moves 1 -> 2
+	if tasks, _ := db.SessionTasks(s.ID); len(tasks) != 0 {
+		t.Fatalf("renumbering replace kept stale tasks: %+v", tasks)
+	}
+}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -17,8 +18,8 @@ type Task struct {
 type TaskFilter struct {
 	Agent       string
 	SinceUnix   int64
-	EndedBefore int64 // skip sessions still being written after this time
-	MinMessages int   // prose messages a never-digested session needs
+	EndedBefore int64  // skip sessions still being written after this time
+	MinMessages int    // prose messages a never-digested session needs
 	UID         string // optional: only this session (still only if it needs tasks)
 	Limit       int
 }
@@ -113,6 +114,18 @@ func (d *DB) SaveTasks(sessionID int64, tasks []Task, through int, summary strin
 		}
 	}
 	return tx.Commit()
+}
+
+// ResetTasks drops a session's tasks inside tx and marks it undigested,
+// for when its messages were renumbered and the anchors no longer hold.
+// Tasks are derived from messages, which are kept: the next digest
+// rebuilds them.
+func (d *DB) ResetTasks(tx *sql.Tx, sessionID int64) error {
+	if _, err := tx.Exec(`DELETE FROM session_tasks WHERE session_id = ?`, sessionID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE sessions SET tasks_through = NULL WHERE id = ?`, sessionID)
+	return err
 }
 
 // SessionTasks returns a session's tasks in order.
