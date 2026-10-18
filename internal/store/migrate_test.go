@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +84,50 @@ func TestOpenRelabelsLegacyClaudeCodeToolResults(t *testing.T) {
 		if len(res) != want {
 			t.Errorf("role=%s search returned %d sessions, want %d", role, len(res), want)
 		}
+	}
+}
+
+// Injected Claude Code text (skill bodies, command caveats, agent
+// hand-offs) indexed before isMeta was honoured is relabelled "system",
+// and sessions titled by it are retitled from a typed prompt.
+func TestOpenRelabelsLegacyClaudeCodeMeta(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aii.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := seed(t, db, &Session{Agent: "claude_code", UID: "cc-1", Title: "<local-command-caveat>Caveat", SourcePath: "/gone.jsonl"}, []Message{
+		{Ordinal: 0, Role: "user", Content: "<local-command-caveat>Caveat</local-command-caveat>"},
+		{Ordinal: 1, Role: "user", Content: "<command-name>/output-style</command-name>"},
+		{Ordinal: 2, Role: "user", Content: "Base directory for this skill: /x\n# skill"},
+		{Ordinal: 3, Role: "user", Content: "Another Claude session sent a message:\n<agent-message>"},
+		{Ordinal: 4, Role: "user", Content: "alright so back to aii"},
+	})
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if db, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	rows, err := db.SessionMessages(cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roles []string
+	for _, r := range rows {
+		roles = append(roles, r.Role)
+	}
+	if got := strings.Join(roles, ","); got != "system,user,system,system,user" {
+		t.Errorf("roles = %s, want system,user,system,system,user", got)
+	}
+	var title string
+	if err := db.QueryRow(`SELECT title FROM sessions WHERE id = ?`, cc).Scan(&title); err != nil {
+		t.Fatal(err)
+	}
+	if title != "alright so back to aii" {
+		t.Errorf("title = %q, want the first typed prompt", title)
 	}
 }

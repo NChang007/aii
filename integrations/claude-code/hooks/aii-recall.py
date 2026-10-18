@@ -45,7 +45,10 @@ lines = []
 terms = query.split()
 hits = []
 while terms and not hits:
-    hits = run(["search", " ".join(terms), "--workspace", cwd, "--since", "30d", "--limit", "8", "--ndjson"])
+    hits = run(["search", " ".join(terms), "--workspace", cwd, "--since", "30d", "--limit", "12", "--ndjson"])
+    # Tool output and raw tool calls make unreadable pointers; keep prose.
+    hits = [r for r in hits if r.get("role") in ("user", "assistant")
+            and not (r.get("snippet") or "").lstrip("…").startswith("[tool_")]
     terms = terms[1:]
 if hits:
     seen = set()

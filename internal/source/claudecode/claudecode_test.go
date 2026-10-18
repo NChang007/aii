@@ -151,3 +151,54 @@ func TestToolResultsAreToolRole(t *testing.T) {
 		t.Errorf("title = %q, want the first thing the user typed", sess.Title)
 	}
 }
+
+func metaLine(uid, text string) string {
+	return fmt.Sprintf(`{"type":"user","isMeta":true,"sessionId":%q,"cwd":"/w","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":%q}]}}`, uid, text) + "\n"
+}
+
+func TestMetaLinesAreSystemRole(t *testing.T) {
+	data := metaLine("s1", "<local-command-caveat>Caveat</local-command-caveat>") +
+		userLine("s1", "<command-name>/output-style</command-name>") +
+		metaLine("s1", "Base directory for this skill: /x") +
+		userLine("s1", "fix the tabs")
+
+	sess, msgs, _, err := parseDelta(context.Background(), strings.NewReader(data), 0, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := []string{}
+	for _, m := range msgs {
+		roles = append(roles, m.Role)
+	}
+	if strings.Join(roles, ",") != "system,user,system,user" {
+		t.Errorf("roles = %v, want [system user system user]", roles)
+	}
+	if sess.Title != "fix the tabs" {
+		t.Errorf("title = %q, want the first typed prompt that isn't a slash command", sess.Title)
+	}
+}
+
+func TestAITitleWins(t *testing.T) {
+	data := userLine("s1", "alright so back to aii") +
+		`{"type":"ai-title","aiTitle":"Early guess","sessionId":"s1"}` + "\n" +
+		`{"type":"ai-title","aiTitle":"Back to aii","sessionId":"s1"}` + "\n"
+
+	sess, _, _, aiTitle, err := parseDeltaTitle(context.Background(), strings.NewReader(data), 0, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Title != "Back to aii" || !aiTitle {
+		t.Errorf("title = %q (ai=%v), want the latest ai-title", sess.Title, aiTitle)
+	}
+}
+
+func TestSlashCommandTitleFallback(t *testing.T) {
+	data := userLine("s1", "<command-name>/init</command-name>")
+	sess, _, _, err := parseDelta(context.Background(), strings.NewReader(data), 0, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(sess.Title, "<command-name>/init") {
+		t.Errorf("title = %q, want the slash command when nothing else exists", sess.Title)
+	}
+}

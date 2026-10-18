@@ -9,6 +9,12 @@ called out under **Changed** when they happen.
 ## [Unreleased]
 
 ### Added
+- Claude Code sessions take their title from Claude Code's own
+  `ai-title` (e.g. "Tab size reduction") when the transcript has one,
+  instead of the first prompt. `--role system` (CLI and MCP) filters to
+  harness-injected text.
+- The Claude Code recall hook skips tool output and raw tool calls, so
+  its pointers are readable prose.
 - Claude Code integration in `integrations/claude-code/`: one installer
   (`sh integrations/claude-code/install.sh`) builds aii, installs the
   aii skill, and registers a `UserPromptSubmit` hook that injects up to
@@ -40,6 +46,12 @@ called out under **Changed** when they happen.
 - `aii index --redact-sources` prints a note and skips pi, opencode, Gemini CLI, Copilot Chat, Aider, Cline, and Roo Code, because aii does not rewrite those agents' files.
 
 ### Fixed
+- Text Claude Code injects on your behalf — skill bodies, `/command`
+  caveats, messages from other agents (`isMeta` lines) — is now indexed
+  under role `system` instead of `user`, and never becomes a session
+  title. Slash-command invocations are used as a title only when the
+  session has no typed prompt. Existing databases are fixed in place on
+  first open.
 - Claude Code tool output is now indexed under role `tool` instead of
   `user`, matching Codex, pi, Cline, Aider and Gemini. `--role user`
   (and MCP `role=user`) now returns only what you typed, and session
