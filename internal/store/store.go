@@ -94,12 +94,69 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("migrate trigram: %w", err)
 	}
 
+	if err := migrateClaudeCodeToolRole(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate claude code tool role: %w", err)
+	}
+
 	if err := ensureSearchIndex(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create search index: %w", err)
 	}
 
 	return &DB{DB: db}, nil
+}
+
+// migrateClaudeCodeToolRole relabels Claude Code tool results that older
+// versions stored as role "user", and retitles sessions whose title came
+// from one. A reindex fixes sessions whose transcript still exists, but
+// Claude Code deletes old transcripts, so the DB may hold the only copy.
+// Runs once, gated on PRAGMA user_version. When another process holds
+// the write lock, Open skips it; the version is only bumped on commit,
+// so a later Open retries.
+func migrateClaudeCodeToolRole(db *sql.DB) error {
+	err := relabelClaudeCodeToolRole(db)
+	if isBusy(err) {
+		return nil
+	}
+	return err
+}
+
+func relabelClaudeCodeToolRole(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Read the version inside the transaction so a second process that
+	// waited on the first one's commit sees 1 and does nothing.
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= 1 {
+		return nil
+	}
+	for _, stmt := range []string{
+		`UPDATE messages SET role = 'tool'
+		  WHERE role = 'user'
+		    AND content LIKE '[tool\_result%' ESCAPE '\'
+		    AND session_id IN (SELECT id FROM sessions WHERE agent = 'claude_code')`,
+		`UPDATE sessions SET title = COALESCE((
+		    SELECT substr(trim(CASE WHEN instr(m.content, char(10)) > 0
+		                            THEN substr(m.content, 1, instr(m.content, char(10)) - 1)
+		                            ELSE m.content END), 1, 200)
+		      FROM messages m
+		     WHERE m.session_id = sessions.id AND m.role = 'user'
+		     ORDER BY m.ordinal LIMIT 1), title)
+		  WHERE agent = 'claude_code' AND title LIKE '[tool\_result%' ESCAPE '\'`,
+		`PRAGMA user_version = 1`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ensureSearchIndex creates the covering index Search uses, if it is

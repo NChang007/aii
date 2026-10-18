@@ -406,42 +406,55 @@ func handleLine(line []byte, lineStart int64, sess *store.Session, _ int) ([]sto
 	}
 }
 
-// userMessage extracts zero-or-one user message from a "type":"user" line.
+// userMessage extracts up to two messages from a "type":"user" line: what
+// the user typed (role "user") and any tool results riding on the same
+// line (role "tool"), so a role=user filter returns only typed text.
 // Content may be a bare string or an array of content parts.
 func userMessage(rec rawLine, lineStart int64) []store.Message {
 	var inner innerMessage
 	if len(rec.Message) == 0 || json.Unmarshal(rec.Message, &inner) != nil {
 		return nil
 	}
-	text := extractUserContent(inner.Content)
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
+	text, tool := extractUserContent(inner.Content)
+	ts := parseTS(rec.Timestamp)
+
+	var out []store.Message
+	if s := strings.TrimSpace(text); s != "" {
+		out = append(out, store.Message{
+			Role:         "user",
+			TS:           ts,
+			Content:      s,
+			SourceOffset: lineStart,
+		})
 	}
-	return []store.Message{{
-		Role:         "user",
-		TS:           parseTS(rec.Timestamp),
-		Content:      text,
-		SourceOffset: lineStart,
-	}}
+	if s := strings.TrimSpace(tool); s != "" {
+		out = append(out, store.Message{
+			Role:         "tool",
+			TS:           ts,
+			Content:      s,
+			SourceOffset: lineStart,
+		})
+	}
+	return out
 }
 
-// extractUserContent handles the three shapes a user content field can take.
-func extractUserContent(raw json.RawMessage) string {
+// extractUserContent handles the three shapes a user content field can
+// take, returning the typed text and the tool results separately.
+func extractUserContent(raw json.RawMessage) (text, tool string) {
 	if len(raw) == 0 {
-		return ""
+		return "", ""
 	}
 	// Case 1: plain string.
 	var asString string
 	if err := json.Unmarshal(raw, &asString); err == nil {
-		return asString
+		return asString, ""
 	}
 	// Case 2: array of parts.
 	var parts []contentPart
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return ""
+		return "", ""
 	}
-	var b strings.Builder
+	var b, tb strings.Builder
 	for _, p := range parts {
 		switch p.Type {
 		case "text":
@@ -454,8 +467,8 @@ func extractUserContent(raw json.RawMessage) string {
 		case "tool_result":
 			body := extractToolResultContent(p.Content)
 			body = truncateRunes(body, maxToolResult)
-			if b.Len() > 0 {
-				b.WriteString("\n")
+			if tb.Len() > 0 {
+				tb.WriteString("\n")
 			}
 			tag := "[tool_result"
 			if p.IsError {
@@ -465,11 +478,11 @@ func extractUserContent(raw json.RawMessage) string {
 				tag += " id=" + shortID(p.ToolUseID)
 			}
 			tag += "] "
-			b.WriteString(tag)
-			b.WriteString(body)
+			tb.WriteString(tag)
+			tb.WriteString(body)
 		}
 	}
-	return b.String()
+	return b.String(), tb.String()
 }
 
 // extractToolResultContent handles the two shapes a tool_result content

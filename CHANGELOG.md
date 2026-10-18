@@ -40,6 +40,13 @@ called out under **Changed** when they happen.
 - `aii index --redact-sources` prints a note and skips pi, opencode, Gemini CLI, Copilot Chat, Aider, Cline, and Roo Code, because aii does not rewrite those agents' files.
 
 ### Fixed
+- Claude Code tool output is now indexed under role `tool` instead of
+  `user`, matching Codex, pi, Cline, Aider and Gemini. `--role user`
+  (and MCP `role=user`) now returns only what you typed, and session
+  titles no longer start with `[tool_result …]`. Existing databases are
+  fixed in place the first time the new version opens them — no reindex
+  needed, and sessions whose transcript Claude Code has since deleted
+  are fixed too.
 - `aii search` no longer fails with `fts5: syntax error near "*"` when
   the query contains an uppercase `AND`, `OR`, or `NOT`. These words
   now work as boolean operators between terms, so

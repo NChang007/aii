@@ -116,3 +116,38 @@ func TestParseDeltaOversizedUnterminatedTailIsRetried(t *testing.T) {
 		t.Fatalf("offset = %d, want %d (start of the unfinished line)", off, len(before))
 	}
 }
+
+func partsLine(uid, partsJSON string) string {
+	return fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":"/w","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":%s}}`, uid, partsJSON) + "\n"
+}
+
+func TestToolResultsAreToolRole(t *testing.T) {
+	data := partsLine("s1", `[{"type":"tool_result","tool_use_id":"toolu_01ABCDEFGHIJK","content":"ls output"}]`) +
+		partsLine("s1", `[{"type":"text","text":"typed by the user"},{"type":"tool_result","tool_use_id":"toolu_02ABCDEFGHIJK","is_error":true,"content":[{"type":"text","text":"boom"}]}]`) +
+		userLine("s1", "plain prompt")
+
+	sess, msgs, _, err := parseDelta(context.Background(), strings.NewReader(data), 0, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ role, content string }{
+		{"tool", "[tool_result id=toolu_01ABCD] ls output"},
+		{"user", "typed by the user"},
+		{"tool", "[tool_result error id=toolu_02ABCD] boom"},
+		{"user", "plain prompt"},
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("got %d messages, want %d: %+v", len(msgs), len(want), msgs)
+	}
+	for i, w := range want {
+		if msgs[i].Role != w.role || msgs[i].Content != w.content {
+			t.Errorf("msg %d = {%s %q}, want {%s %q}", i, msgs[i].Role, msgs[i].Content, w.role, w.content)
+		}
+		if msgs[i].Ordinal != i {
+			t.Errorf("msg %d ordinal = %d", i, msgs[i].Ordinal)
+		}
+	}
+	if sess.Title != "typed by the user" {
+		t.Errorf("title = %q, want the first thing the user typed", sess.Title)
+	}
+}
