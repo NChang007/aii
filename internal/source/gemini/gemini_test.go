@@ -125,17 +125,18 @@ func TestJSONLReplay(t *testing.T) {
 	runIndex(t, db, src, false)
 	runIndex(t, db, src, false)
 	_, got = rows(t, db, sessionID)
-	check(t, got, []want{
-		{"user", "Summarize @README.md"},
-		{"user", "Try again, shorter"},
-		{"assistant", "A sample."},
-		{"tool", `[tool_call name=run_shell_command] {"command":"false"}`},
-		{"tool", "[tool_result error name=run_shell_command] exit 1"},
-	})
+	// The rewound turn stays (indexing never loses history); the retry is
+	// added after it.
+	check(t, got, append(append([]want{}, first...),
+		want{"user", "Try again, shorter"},
+		want{"assistant", "A sample."},
+		want{"tool", `[tool_call name=run_shell_command] {"command":"false"}`},
+		want{"tool", "[tool_result error name=run_shell_command] exit 1"},
+	))
 
 	runIndex(t, db, src, true)
-	if _, got = rows(t, db, sessionID); len(got) != 5 {
-		t.Fatalf("full reindex rows = %d, want 5", len(got))
+	if _, got = rows(t, db, sessionID); len(got) != 9 {
+		t.Fatalf("full reindex rows = %d, want 9", len(got))
 	}
 }
 

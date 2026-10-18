@@ -145,8 +145,13 @@ func (s *Source) scanFile(ctx context.Context, db *store.DB, path string, full b
 	if err != nil {
 		return err
 	}
-	if t := subagentTitle(abs); t != "" {
-		sess.Title, aiTitle = t, true
+	if uid, parent, ok := subagentIdentity(abs); ok {
+		// The path names the subagent and its parent; records can't be
+		// trusted for that, since they all carry the parent's sessionId.
+		sess.UID, sess.ParentUID = uid, parent
+		if t := subagentTitle(abs); t != "" {
+			sess.Title, aiTitle = t, true
+		}
 	}
 	// On an incremental run the derived title comes from a later turn.
 	// Keep it only if the stored session has no title yet, which happens
@@ -697,6 +702,22 @@ func firstUserText(msgs []store.Message) string {
 		}
 	}
 	return fallback
+}
+
+// subagentIdentity reads a subagent transcript's own uid and its parent
+// session's uid from its path, <project>/<parent>/subagents/agent-<id>.jsonl.
+func subagentIdentity(path string) (uid, parent string, ok bool) {
+	dir := filepath.Dir(path)
+	if filepath.Base(dir) != "subagents" {
+		return "", "", false
+	}
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	uid = strings.TrimPrefix(name, "agent-")
+	parent = filepath.Base(filepath.Dir(dir))
+	if uid == "" || uid == name || parent == "" {
+		return "", "", false
+	}
+	return uid, parent, true
 }
 
 // subagentTitle returns "<agentType>: <description>" from the .meta.json

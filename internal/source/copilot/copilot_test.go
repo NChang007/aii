@@ -126,8 +126,11 @@ func TestOperationLog(t *testing.T) {
 	if s.Title != "Parser walkthrough" || s.EndedAt != 1772359300 {
 		t.Errorf("session = %+v", s)
 	}
+	// The rewritten first response is added after the original, which
+	// stays (indexing never loses history).
 	check(t, got, []want{
 		{"user", "Explain parse.go\nbriefly"},
+		{"assistant", "It parses `parse.go` input."},
 		{"assistant", "It reads input."},
 		{"user", "Run the tests"},
 		{"thinking", "Run go test."},
@@ -139,8 +142,8 @@ func TestOperationLog(t *testing.T) {
 	})
 
 	runIndex(t, db, src, true)
-	if _, got = rows(t, db, sid); len(got) != 9 {
-		t.Fatalf("full reindex rows = %d, want 9", len(got))
+	if _, got = rows(t, db, sid); len(got) != 10 {
+		t.Fatalf("full reindex rows = %d, want 10", len(got))
 	}
 }
 

@@ -203,7 +203,7 @@ func (d *DB) Search(q Query) ([]Result, error) {
         top_sessions AS MATERIALIZED (
             SELECT ss.session_id, ss.best_score, ss.match_count, %s AS sort_key
             FROM session_scores ss JOIN sessions s2 ON s2.id = ss.session_id
-            ORDER BY sort_key, ss.best_score LIMIT ? OFFSET ?
+            ORDER BY sort_key, ss.best_score, ss.session_id LIMIT ? OFFSET ?
         ),
         page_hits AS (
             SELECT * FROM (
@@ -226,7 +226,7 @@ func (d *DB) Search(q Query) ([]Result, error) {
         JOIN sessions s ON s.id = r.session_id
         JOIN top_sessions ts_info ON ts_info.session_id = r.session_id
         WHERE r.rn <= %d
-        ORDER BY ts_info.sort_key, ts_info.best_score, s.id, r.rn`,
+        ORDER BY ts_info.sort_key, ts_info.best_score, ts_info.session_id, r.rn`,
 		rawHits, sortKey, maxExcerptsPerSession)
 	args = append(args, sortArgs...)
 	args = append(args, q.Limit, q.Offset)

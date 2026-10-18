@@ -76,13 +76,16 @@ called out under **Changed** when they happen.
   `--sort recent` lists newest first; MCP `search` takes `sort` too.
   `aii related` keeps pure relevance.
 - Indexing never loses history. `aii index --full`, or a transcript
-  that shrank or was rewritten, no longer deletes the file's sessions: a
-  re-read at least as long as what is stored replaces that session's
-  messages (edits and parser fixes apply, nothing is duplicated), and a
-  shorter one keeps every stored message and adds only content not
-  already stored. Sessions whose transcript is gone are never touched.
-  Copilot and Gemini sessions migrated from `.json` to `.jsonl` are
-  re-read in place instead of deleted and re-added.
+  that shrank or was rewritten, no longer deletes the file's sessions.
+  A re-read replaces a session's stored messages only when every stored
+  message is still in it (repeats counted; a message that was still
+  being written counts if it has since grown, e.g. "Answ" -> "Answer");
+  otherwise every stored message stays and only content not already
+  stored is added, so edited or regenerated replies keep their earlier
+  version without duplicating anything else. The replacement runs in
+  the same transaction as the insert. Sessions whose transcript is gone
+  are never touched. Copilot and Gemini sessions migrated from `.json`
+  to `.jsonl` are re-read in place.
 - README install instructions now lead with the one-line installer and
   manual prebuilt-binary download (with a per-platform asset table);
   `go install` / `go build` are now documented as the "from source"

@@ -385,9 +385,9 @@ func (d *DB) SaveState(s IndexState) error {
 }
 
 // DeleteSessionMessages removes one session's messages (not the session)
-// so a fresh re-read of it can take their place.
-func (d *DB) DeleteSessionMessages(sessionID int64) error {
-	_, err := d.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID)
+// inside tx, so a re-read of it can take their place in the same commit.
+func (d *DB) DeleteSessionMessages(tx *sql.Tx, sessionID int64) error {
+	_, err := tx.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID)
 	return err
 }
 

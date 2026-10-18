@@ -125,3 +125,52 @@ func TestTruncateIsAppendOnly(t *testing.T) {
 		t.Fatalf("after rewrite = %s", got)
 	}
 }
+
+// A re-read as long as what is stored but missing some stored content
+// (an edited or regenerated message) must not erase it: replacement only
+// happens when every stored message is still in the re-read.
+func TestRewriteOfSameLengthKeepsOldContent(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "aii.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	batch := func(m []store.Message) source.Batch {
+		return source.Batch{
+			Session:  store.Session{Agent: "claude_code", UID: "s1", SourcePath: "/f.jsonl"},
+			Messages: m, State: store.IndexState{SourcePath: "/f.jsonl"}, Truncate: true,
+		}
+	}
+	for _, m := range [][]store.Message{msgs("a", "b", "c"), msgs("a", "x", "c")} {
+		if err := apply(db, batch(m), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(contents(t, db, "s1"), ","); got != "user:a,user:b,user:c,user:x" {
+		t.Fatalf("after same-length rewrite = %s", got)
+	}
+}
+
+// Repeated identical messages ("ok", "ok") are distinct messages, not
+// duplicates of each other.
+func TestMergeKeepsRepeatedMessages(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "aii.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	batch := func(m []store.Message) source.Batch {
+		return source.Batch{
+			Session:  store.Session{Agent: "claude_code", UID: "s1", SourcePath: "/f.jsonl"},
+			Messages: m, State: store.IndexState{SourcePath: "/f.jsonl"}, Truncate: true,
+		}
+	}
+	for _, m := range [][]store.Message{msgs("ok", "q", "z"), msgs("ok", "ok")} {
+		if err := apply(db, batch(m), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(contents(t, db, "s1"), ","); got != "user:ok,user:q,user:z,user:ok" {
+		t.Fatalf("after merge = %s", got)
+	}
+}

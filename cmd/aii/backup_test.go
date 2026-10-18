@@ -23,7 +23,13 @@ func TestBackupKeepsNewestSnapshots(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep"), 0o644); err != nil {
+	for _, f := range []string{"notes.txt", "aii-manual.db"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("keep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A leftover from a killed run is cleaned up.
+	if err := os.WriteFile(filepath.Join(dir, "aii-20260901-030000.db.partial"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,7 +41,7 @@ func TestBackupKeepsNewestSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	snaps, _ := filepath.Glob(filepath.Join(dir, "aii-*.db"))
+	snaps, _ := filepath.Glob(filepath.Join(dir, "aii-2*.db"))
 	if len(snaps) != 2 {
 		t.Fatalf("snapshots = %v, want the newest 2", snaps)
 	}
@@ -45,8 +51,13 @@ func TestBackupKeepsNewestSnapshots(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "aii-20261001-030000.db")); !os.IsNotExist(err) {
 		t.Errorf("oldest snapshot still present (err %v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "notes.txt")); err != nil {
-		t.Errorf("unrelated file removed: %v", err)
+	for _, f := range []string{"notes.txt", "aii-manual.db"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("unrelated file %s removed: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "aii-20260901-030000.db.partial")); !os.IsNotExist(err) {
+		t.Errorf("leftover .partial not cleaned (err %v)", err)
 	}
 
 	snap, err := store.Open(last)

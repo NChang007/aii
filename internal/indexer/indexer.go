@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,12 +81,13 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 	// or a source that shrank or was rewritten) is reconciled with what is
 	// stored for that session instead of deleting the file's sessions. The
 	// index outlives the transcripts it was built from.
+	replace := false
 	if b.Truncate && b.Session.UID != "" {
-		merged, err := mergeTruncated(db, b)
+		var err error
+		b.Messages, replace, err = planTruncated(db, b)
 		if err != nil {
 			return fmt.Errorf("merge re-read: %w", err)
 		}
-		b.Messages = merged
 	}
 
 	// Some batches carry only a state update (e.g. codex history scan
@@ -99,9 +101,17 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 		return fmt.Errorf("upsert session: %w", err)
 	}
 
+	// Replacing a session's messages happens in the same transaction as
+	// the insert, so a failure can't leave the session emptied.
 	tx, err := db.Begin()
 	if err != nil {
 		return err
+	}
+	if replace {
+		if err := db.DeleteSessionMessages(tx, id); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("replace messages: %w", err)
+		}
 	}
 	if err := db.InsertMessages(tx, id, b.Messages); err != nil {
 		tx.Rollback()
@@ -122,45 +132,99 @@ func apply(db *store.DB, b source.Batch, verbose bool) error {
 	return nil
 }
 
-// mergeTruncated reconciles a re-read of a whole session with the rows
-// already stored for it and returns the messages to insert.
+// planTruncated reconciles a re-read of a whole session with the rows
+// already stored for it. It returns the messages to insert and whether
+// they replace the stored ones.
 //
-// A re-read at least as long as what is stored is the source's current
-// version of the session: it replaces the stored messages, so edits and
-// parser fixes apply and nothing is duplicated. A shorter re-read means
-// the source lost content (a shrunk or rewritten file): every stored row
-// stays, and only messages whose content isn't stored yet are appended.
-func mergeTruncated(db *store.DB, b source.Batch) ([]store.Message, error) {
+// When every stored message is still in the re-read (counting repeats,
+// ignoring role; a message that was still being written counts if the
+// re-read has it grown, e.g. "Answ" -> "Answer"), the re-read is the
+// source's current, complete version: it replaces the stored rows, so parser fixes and new turns
+// apply and nothing is duplicated. Otherwise the source lost or changed
+// content (an edit, a regenerated reply, a shrunk or rewritten file):
+// every stored row stays, and only re-read messages not already stored
+// are appended after them.
+func planTruncated(db *store.DB, b source.Batch) ([]store.Message, bool, error) {
 	prior, err := db.SessionByUID(b.Session.Agent, b.Session.UID)
 	if err != nil || prior == nil {
-		return b.Messages, err
+		return b.Messages, false, err
 	}
 	stored, err := db.SessionMessages(prior.ID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if len(b.Messages) >= len(stored) {
-		return b.Messages, db.DeleteSessionMessages(prior.ID)
+	if len(stored) == 0 {
+		return b.Messages, false, nil
 	}
-	seen := make(map[string]bool, len(stored))
+
+	if covers(b.Messages, stored) {
+		return b.Messages, true, nil
+	}
+
+	have := make(map[string]int, len(stored))
 	next := 0
 	for _, r := range stored {
-		seen[r.Content] = true
+		have[r.Content]++
 		if r.Ordinal >= next {
 			next = r.Ordinal + 1
 		}
 	}
 	var out []store.Message
 	for _, m := range b.Messages {
-		if seen[m.Content] {
+		if have[m.Content] > 0 {
+			have[m.Content]--
 			continue
 		}
-		seen[m.Content] = true
 		m.Ordinal = next
 		next++
 		out = append(out, m)
 	}
-	return out, nil
+	return out, false, nil
+}
+
+// covers reports whether every stored message appears in the re-read,
+// each re-read message accounting for at most one stored one. A stored
+// message also matches a re-read message that it is a prefix of, or that
+// is a prefix of it: a turn that was mid-write at the last run ("Answ" ->
+// "Answer"), or one that had the start of the next record glued on.
+func covers(reread []store.Message, stored []store.Row) bool {
+	left := make(map[string]int, len(reread))
+	for _, m := range reread {
+		left[m.Content]++
+	}
+	var partial []string
+	for _, r := range stored {
+		if left[r.Content] > 0 {
+			left[r.Content]--
+			continue
+		}
+		partial = append(partial, r.Content)
+	}
+	for _, p := range partial {
+		found := false
+		for c, n := range left {
+			if n > 0 && c != p && extends(c, p) {
+				left[c]--
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// extends reports whether one of a and b is the other grown or cut:
+// the shorter, without trailing whitespace and sentence punctuation, is
+// a non-empty prefix of the longer ("Done." -> "Done, and tested.").
+func extends(a, b string) bool {
+	if len(a) < len(b) {
+		a, b = b, a
+	}
+	b = strings.TrimRight(b, " \t\r\n.…")
+	return b != "" && strings.HasPrefix(a, b)
 }
 
 // redactBatch scrubs secrets out of every user-visible text field before

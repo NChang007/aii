@@ -32,6 +32,10 @@ if data.get("hook_event_name") == "SubagentStart":
     sys.exit(0)
 
 prompt = data.get("prompt") or ""
+# Messages relayed from other agents (subagent hand-backs, teammates) are
+# not the user asking about past work.
+if prompt.lstrip().startswith(("Another Claude session sent a message", "<agent-message")):
+    sys.exit(0)
 if not TRIGGER.search(prompt):
     sys.exit(0)
 
@@ -61,7 +65,8 @@ while terms and not hits:
     hits = run(["search", " ".join(terms), "--workspace", cwd, "--since", "30d", "--limit", "12", "--ndjson"])
     # Tool output and raw tool calls make unreadable pointers; keep prose.
     hits = [r for r in hits if r.get("role") in ("user", "assistant")
-            and not (r.get("snippet") or "").lstrip("…").startswith("[tool_")]
+            and "[tool_" not in (r.get("snippet") or "")
+            and "tool_use name=" not in (r.get("snippet") or "")]
     terms = terms[1:]
 if hits:
     seen = set()

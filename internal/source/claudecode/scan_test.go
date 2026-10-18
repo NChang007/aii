@@ -133,3 +133,38 @@ func TestSubagentTranscriptsAreIndexed(t *testing.T) {
 		t.Errorf("ListSessions(Parent) = %+v, %v", kids, err)
 	}
 }
+
+// A subagent file whose first record has no agentId (any non-message
+// line) must still be indexed as the subagent, never as its parent.
+func TestSubagentIdentityComesFromPath(t *testing.T) {
+	root := t.TempDir()
+	proj := filepath.Join(root, "proj")
+	sub := filepath.Join(proj, "s1", "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appendLine(t, filepath.Join(proj, "s1.jsonl"), userRecord("parent prompt"))
+	agent := filepath.Join(sub, "agent-xyz789.jsonl")
+	appendLine(t, agent, `{"type":"permission-mode","sessionId":"s1","permissionMode":"default"}`)
+	appendLine(t, agent, `{"type":"user","isSidechain":true,"agentId":"xyz789","sessionId":"s1","cwd":"/w","timestamp":"2026-01-01T00:01:00Z","message":{"role":"user","content":"Do the thing"}}`)
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "aii.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := indexer.Run(context.Background(), db, []source.Source{&claudecode.Source{Root: root}}, indexer.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	parent, _ := db.SessionByUID("claude_code", "s1")
+	child, _ := db.SessionByUID("claude_code", "xyz789")
+	if child == nil || child.ParentUID != "s1" {
+		t.Fatalf("child = %+v, want uid xyz789 with parent s1", child)
+	}
+	if rows, _ := db.SessionMessages(parent.ID); len(rows) != 1 {
+		t.Errorf("parent has %d messages, want only its own 1", len(rows))
+	}
+	if parent.SourcePath == child.SourcePath {
+		t.Errorf("parent source_path overwritten by the subagent file")
+	}
+}

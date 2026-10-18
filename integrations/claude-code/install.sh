@@ -29,7 +29,7 @@ for arg in "$@"; do
         --with-mcp) WITH_MCP=1 ;;
         --with-digest) WITH_DIGEST=1 ;;
         --with-backup) WITH_BACKUP=1 ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
         *) die "unknown flag $arg (see --help)" ;;
     esac
 done
@@ -197,7 +197,8 @@ if [ "$WITH_DIGEST" = 1 ]; then
   <integer>3600</integer>" digest --limit 20
 fi
 if [ "$WITH_BACKUP" = 1 ]; then
-    # Weekly, Sunday 03:00; launchd runs a missed job at next wake.
+    # Weekly, Sunday 03:00. launchd runs a time missed while asleep at next
+    # wake; one missed while powered off is skipped until the next Sunday.
     install_agent com.aii.backup "  <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
