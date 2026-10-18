@@ -8,7 +8,8 @@
 #   sh integrations/claude-code/install.sh            # binary + skill + hook
 #   sh integrations/claude-code/install.sh --with-mcp # also register `aii mcp`
 #   sh integrations/claude-code/install.sh --with-digest  # hourly `aii digest` (macOS)
-#   (flags combine: --with-mcp --with-digest)
+#   sh integrations/claude-code/install.sh --with-backup  # weekly `aii backup` (macOS)
+#   (flags combine: --with-mcp --with-digest --with-backup)
 #   AII_SKIP_BUILD=1 sh integrations/claude-code/install.sh
 
 set -eu
@@ -22,11 +23,12 @@ die() { echo "error: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # Parse flags before touching anything, so a typo changes nothing.
-WITH_MCP=0; WITH_DIGEST=0
+WITH_MCP=0; WITH_DIGEST=0; WITH_BACKUP=0
 for arg in "$@"; do
     case "$arg" in
         --with-mcp) WITH_MCP=1 ;;
         --with-digest) WITH_DIGEST=1 ;;
+        --with-backup) WITH_BACKUP=1 ;;
         -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         *) die "unknown flag $arg (see --help)" ;;
     esac
@@ -51,7 +53,7 @@ if [ "${AII_SKIP_BUILD:-}" != "1" ]; then
     # launchd pins a code requirement to the binary it last spawned and
     # refuses a rebuilt one (exit 78, EX_CONFIG) until the job is reloaded.
     if [ "$(uname -s)" = Darwin ]; then
-        for label in com.aii.index com.aii.digest; do
+        for label in com.aii.index com.aii.digest com.aii.backup; do
             plist="$HOME/Library/LaunchAgents/$label.plist"
             [ -f "$plist" ] || continue
             launchctl unload "$plist" 2>/dev/null || true
@@ -120,65 +122,91 @@ if [ "$WITH_MCP" = 1 ]; then
     fi
 fi
 
-# --- digest (optional, macOS) ------------------------------------------
+# --- scheduled jobs (optional, macOS) ----------------------------------
 
-if [ "$WITH_DIGEST" = 1 ]; then
-    [ "$(uname -s)" = Darwin ] || die "--with-digest installs a LaunchAgent and is macOS only; schedule \`aii digest\` with cron instead"
-    have claude || die "claude CLI not on PATH; aii digest needs it"
-    CLAUDE_BIN=$(command -v claude)
-    case "$CLAUDE_BIN" in /*) ;; *) die "claude resolves to '$CLAUDE_BIN', not a path; can't pin it for launchd" ;; esac
-    PLIST="$HOME/Library/LaunchAgents/com.aii.digest.plist"
-    LOG="$HOME/.local/share/aii/digest.log"
-    mkdir -p "$(dirname "$PLIST")" "$(dirname "$LOG")"
-    # launchd starts jobs with a minimal PATH, so pin claude's directory
-    # (and node's, for an npm-installed claude whose shebang needs it).
-    JOB_PATH="$(dirname "$CLAUDE_BIN")"
-    if have node; then JOB_PATH="$JOB_PATH:$(dirname "$(command -v node)")"; fi
-    JOB_PATH="$JOB_PATH:/usr/bin:/bin:/usr/sbin:/sbin"
-    xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
-    # Carry the env vars aii reads, so the job uses the same DB and command.
-    EXTRA_ENV=""
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+# install_agent LABEL SCHEDULE_XML ARGS...: write and load a LaunchAgent
+# that runs `aii ARGS...` on SCHEDULE_XML, carrying PATH (pinned to the
+# directories of claude and node, since launchd starts jobs with a
+# minimal PATH) and the env vars aii reads.
+install_agent() {
+    label=$1; schedule=$2; shift 2
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    log="$HOME/.local/share/aii/${label#com.aii.}.log"
+    mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
+    job_path=""
+    for tool in claude node; do
+        if have "$tool"; then
+            bin=$(command -v "$tool")
+            case "$bin" in /*) job_path="$job_path$(dirname "$bin"):" ;; esac
+        fi
+    done
+    job_path="${job_path}/usr/bin:/bin:/usr/sbin:/sbin"
+    extra_env=""
     for var in AII_DB AII_DIGEST_CMD; do
         eval "val=\${$var:-}"
-        [ -n "$val" ] && EXTRA_ENV="$EXTRA_ENV    <key>$var</key>
+        [ -n "$val" ] && extra_env="$extra_env    <key>$var</key>
     <string>$(xml "$val")</string>
 "
     done
-    cat > "$PLIST" <<PLIST
+    prog_args="    <string>$(xml "$BIN_DIR/aii")</string>
+"
+    for a in "$@"; do
+        prog_args="$prog_args    <string>$(xml "$a")</string>
+"
+    done
+    cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.aii.digest</string>
+  <string>$label</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$(xml "$BIN_DIR/aii")</string>
-    <string>digest</string>
-    <string>--limit</string>
-    <string>20</string>
-  </array>
+$prog_args  </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>$(xml "$JOB_PATH")</string>
-$EXTRA_ENV  </dict>
-  <key>StartInterval</key>
-  <integer>3600</integer>
+    <string>$(xml "$job_path")</string>
+$extra_env  </dict>
+$schedule
   <key>StandardOutPath</key>
-  <string>$(xml "$LOG")</string>
+  <string>$(xml "$log")</string>
   <key>StandardErrorPath</key>
-  <string>$(xml "$LOG")</string>
+  <string>$(xml "$log")</string>
 </dict>
 </plist>
 PLIST
-    plutil -lint "$PLIST" >/dev/null || die "generated $PLIST is not a valid plist"
-    launchctl unload "$PLIST" 2>/dev/null || true
-    if launchctl load "$PLIST" 2>/dev/null; then
-        echo "digest  hourly LaunchAgent $PLIST (log: $LOG)"
+    plutil -lint "$plist" >/dev/null || die "generated $plist is not a valid plist"
+    launchctl unload "$plist" 2>/dev/null || true
+    if launchctl load "$plist" 2>/dev/null; then
+        echo "agent   $label (log: $log)"
     else
-        echo "warning: wrote $PLIST but launchctl could not load it (no GUI session?); it loads at next login" >&2
+        echo "warning: wrote $plist but launchctl could not load it (no GUI session?); it loads at next login" >&2
     fi
+}
+
+if [ "$WITH_DIGEST" = 1 ] || [ "$WITH_BACKUP" = 1 ]; then
+    [ "$(uname -s)" = Darwin ] || die "--with-digest/--with-backup install LaunchAgents and are macOS only; schedule \`aii digest\` / \`aii backup\` with cron instead"
+fi
+if [ "$WITH_DIGEST" = 1 ]; then
+    have claude || die "claude CLI not on PATH; aii digest needs it"
+    install_agent com.aii.digest "  <key>StartInterval</key>
+  <integer>3600</integer>" digest --limit 20
+fi
+if [ "$WITH_BACKUP" = 1 ]; then
+    # Weekly, Sunday 03:00; launchd runs a missed job at next wake.
+    install_agent com.aii.backup "  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>" backup --keep 2
 fi
 
 echo "done. Open /hooks once in a running session, or restart it, to load the hook."

@@ -18,7 +18,14 @@ From the repo root:
 sh integrations/claude-code/install.sh            # build aii, install skill + hook
 sh integrations/claude-code/install.sh --with-mcp # also register the MCP server
 sh integrations/claude-code/install.sh --with-digest # hourly one-line session summaries (macOS)
+sh integrations/claude-code/install.sh --with-backup # weekly index snapshot, newest 2 kept (macOS)
 ```
+
+`--with-backup` runs `aii backup --keep 2` every Sunday at 03:00 (or at
+next wake), writing a compacted `VACUUM INTO` snapshot to
+`~/Backups/aii/aii-<timestamp>.db` and removing older `aii-*.db`
+snapshots there. Claude Code deletes transcripts after
+`cleanupPeriodDays`, so the index can be the only copy of old sessions.
 
 `--with-digest` runs `aii digest --limit 20` every hour. It summarises
 finished sessions with `claude -p --model haiku` (no transcript written,

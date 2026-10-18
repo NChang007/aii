@@ -9,6 +9,10 @@ called out under **Changed** when they happen.
 ## [Unreleased]
 
 ### Added
+- `aii backup [--dir ~/Backups/aii] [--keep 2]` writes a compacted,
+  consistent snapshot of the index (`VACUUM INTO`, safe while indexing
+  runs) and removes older `aii-*.db` snapshots beyond `--keep`. The
+  Claude Code installer's `--with-backup` runs it weekly on macOS.
 - Claude Code subagent transcripts (`<session>/subagents/agent-*.jsonl`)
   are indexed as their own sessions, titled `<agentType>: <description>`
   from their `.meta.json` and linked to the session that spawned them
