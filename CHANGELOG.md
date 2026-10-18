@@ -9,6 +9,12 @@ called out under **Changed** when they happen.
 ## [Unreleased]
 
 ### Added
+- Claude Code integration in `integrations/claude-code/`: one installer
+  (`sh integrations/claude-code/install.sh`) builds aii, installs the
+  aii skill, and registers a `UserPromptSubmit` hook that injects up to
+  3 aii cite tokens when a prompt refers to past work ("back to",
+  "did we", "last time", "remember"…). Prompts that don't refer to past
+  work get nothing added. `--with-mcp` also registers `aii mcp`.
 - One-line install script for macOS and Linux — no Go toolchain
   required: `curl -fsSL
   https://raw.githubusercontent.com/ericmason/aii/main/scripts/install.sh
