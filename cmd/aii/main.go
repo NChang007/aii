@@ -57,6 +57,8 @@ Usage:
                 [--format md|plain|ndjson | --ndjson | --pretty]
   aii ask     <question> [--k 6] [--context 2] [--agent ..] [--since ..]
                          [--cmd "claude -p"] [--dry-run] [--show-sources]
+  aii digest  [--limit 20] [--agent ..] [--since ..] [--min-messages 6]
+               [--cmd "claude -p"] [--dry-run]   # one-line session summaries
   aii related <uid> [--limit 10] [--agent ..]  # find similar sessions
   aii mcp                                       # stdio MCP server for agent use
   aii stats
@@ -94,6 +96,8 @@ func main() {
 		err = cmdSearch(args)
 	case "sessions", "list":
 		err = cmdSessions(args)
+	case "digest":
+		err = cmdDigest(ctx, args)
 	case "ask":
 		err = cmdAsk(ctx, args)
 	case "show":

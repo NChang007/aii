@@ -9,6 +9,16 @@ called out under **Changed** when they happen.
 ## [Unreleased]
 
 ### Added
+- `aii digest` writes a one-line summary (what was wanted, what was
+  decided or built, how it ended) for finished sessions that have none,
+  so `aii sessions`, search results and MCP `list_sessions` say what a
+  session was about without opening it. It sends only typed prompts and
+  assistant prose (head and tail past `--max-chars`) to
+  `claude -p --model haiku` by default, which writes no transcript of
+  its own; override with `--cmd` or `$AII_DIGEST_CMD`. The Claude Code
+  installer's `--with-digest` runs it hourly on macOS.
+- The Claude Code installer replaces the binary atomically, so a
+  running indexer or `aii mcp` server is no longer killed mid-run.
 - The Claude Code installer also registers the recall hook on
   `SubagentStart`, so subagents are told aii exists (one line; the event
   carries no task text to search on). Skill backups are timestamped, so

@@ -7,6 +7,8 @@
 # Usage (from the repo root):
 #   sh integrations/claude-code/install.sh            # binary + skill + hook
 #   sh integrations/claude-code/install.sh --with-mcp # also register `aii mcp`
+#   sh integrations/claude-code/install.sh --with-digest  # hourly `aii digest` (macOS)
+#   (flags combine: --with-mcp --with-digest)
 #   AII_SKIP_BUILD=1 sh integrations/claude-code/install.sh
 
 set -eu
@@ -26,7 +28,11 @@ have python3 || die "python3 is required (the hook and settings merge use it)"
 if [ "${AII_SKIP_BUILD:-}" != "1" ]; then
     have go || die "go is required to build aii (or set AII_SKIP_BUILD=1)"
     mkdir -p "$BIN_DIR"
-    (cd "$ROOT" && go build -o "$BIN_DIR/aii" ./cmd/aii)
+    # Build beside the target, then rename: overwriting a running binary in
+    # place gets the running process (cron indexer, `aii mcp`) SIGKILLed on
+    # macOS; a rename leaves it on the old inode.
+    (cd "$ROOT" && go build -o "$BIN_DIR/.aii.new" ./cmd/aii)
+    mv -f "$BIN_DIR/.aii.new" "$BIN_DIR/aii"
     echo "built   $BIN_DIR/aii ($("$BIN_DIR/aii" version 2>/dev/null | head -1))"
 fi
 
@@ -80,7 +86,16 @@ PY
 
 # --- MCP (optional) -----------------------------------------------------
 
-if [ "${1:-}" = "--with-mcp" ]; then
+WITH_MCP=0; WITH_DIGEST=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-mcp) WITH_MCP=1 ;;
+        --with-digest) WITH_DIGEST=1 ;;
+        *) die "unknown flag $arg" ;;
+    esac
+done
+
+if [ "$WITH_MCP" = 1 ]; then
     have claude || die "claude CLI not on PATH; cannot register the MCP server"
     if claude mcp list 2>/dev/null | grep -q '^aii:'; then
         echo "mcp     already registered"
@@ -88,6 +103,48 @@ if [ "${1:-}" = "--with-mcp" ]; then
         claude mcp add -s user aii -- "$BIN_DIR/aii" mcp
         echo "mcp     registered (user scope)"
     fi
+fi
+
+# --- digest (optional, macOS) ------------------------------------------
+
+if [ "$WITH_DIGEST" = 1 ]; then
+    [ "$(uname -s)" = Darwin ] || die "--with-digest installs a LaunchAgent and is macOS only; schedule \`aii digest\` with cron instead"
+    have claude || die "claude CLI not on PATH; aii digest needs it"
+    PLIST="$HOME/Library/LaunchAgents/com.aii.digest.plist"
+    LOG="$HOME/.local/share/aii/digest.log"
+    # launchd starts jobs with a minimal PATH, so pin claude's directory.
+    JOB_PATH="$(dirname "$(command -v claude)"):/usr/bin:/bin:/usr/sbin:/sbin"
+    cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aii.digest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BIN_DIR/aii</string>
+    <string>digest</string>
+    <string>--limit</string>
+    <string>20</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$JOB_PATH</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>StandardOutPath</key>
+  <string>$LOG</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG</string>
+</dict>
+</plist>
+PLIST
+    launchctl unload "$PLIST" 2>/dev/null || true
+    launchctl load "$PLIST"
+    echo "digest  hourly LaunchAgent $PLIST (log: $LOG)"
 fi
 
 echo "done. Open /hooks once in a running session, or restart it, to load the hook."

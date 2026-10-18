@@ -17,7 +17,13 @@ From the repo root:
 ```sh
 sh integrations/claude-code/install.sh            # build aii, install skill + hook
 sh integrations/claude-code/install.sh --with-mcp # also register the MCP server
+sh integrations/claude-code/install.sh --with-digest # hourly one-line session summaries (macOS)
 ```
+
+`--with-digest` runs `aii digest --limit 20` every hour. It summarises
+finished sessions with `claude -p --model haiku` (no transcript written,
+hooks off), about 5 s and one small Haiku call per session; summaries
+show up in `aii sessions`, search results and `list_sessions`.
 
 The installer builds `./cmd/aii` into `~/.local/bin/aii`, backs up any
 different existing skill to `SKILL.md.bak.<timestamp>`, and adds the hook to
