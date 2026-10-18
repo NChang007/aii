@@ -1,7 +1,28 @@
 # aii — search every AI chat you've had locally
 
-[![CI](https://github.com/ericmason/aii/actions/workflows/ci.yml/badge.svg)](https://github.com/ericmason/aii/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **This is a fork of [ericmason/aii](https://github.com/ericmason/aii)**
+> that turns aii into long-term memory for Claude Code. On top of
+> upstream it adds:
+>
+> - **History that is never deleted.** Re-reads only add; sessions whose
+>   transcript Claude Code has cleaned up stay in the index for good.
+> - **Task lists per session.** `aii digest` records one line per task
+>   you worked on (what was done, how it ended), anchored to the prompt
+>   that started it, plus a summary of the whole session. Search them
+>   with `aii tasks` or MCP `search_tasks`.
+> - **Subagent transcripts**, indexed as their own sessions and linked to
+>   the session that spawned them.
+> - **Recent-first search**: relevance weighted toward recent sessions.
+> - **Clean roles and titles** for Claude Code: tool output is `tool`,
+>   injected text is `system`, so `--role user` is only what you typed.
+> - **Weekly backups** (`aii backup`) and a **one-command Claude Code
+>   setup**: skill, recall hook, MCP server, and scheduled jobs.
+>
+> Install it with the steps under [Install this fork](#install-this-fork).
+> The upstream install methods below fetch ericmason's releases, which
+> don't include these changes.
 
 `aii` indexes every conversation from your local AI coding agents into a
 SQLite FTS5 database and makes them searchable from the CLI, a minimal
@@ -20,7 +41,7 @@ Three things keep it useful:
   drive it without regex-parsing pretty tables.
 
 Indexed sources:
-- **Claude Code** — `~/.claude/projects/*/*.jsonl`
+- **Claude Code** — `~/.claude/projects/*/*.jsonl`, plus subagent transcripts in `~/.claude/projects/*/*/subagents/agent-*.jsonl`
 - **Codex** — `~/.codex/sessions/**/rollout-*.jsonl` + `~/.codex/history.jsonl`
 - **Cursor** — `~/Library/Application Support/Cursor/User/{workspaceStorage,globalStorage}/state.vscdb`
 - **pi** — `~/.pi/agent/sessions/*/*.jsonl` (honors `PI_CODING_AGENT_SESSION_DIR` and `PI_CODING_AGENT_DIR`)
@@ -31,7 +52,45 @@ Indexed sources:
 - **Cline** — `~/.cline/data` (Cline CLI, or `$CLINE_DATA_DIR`, or `$CLINE_DIR/data`) and the VS Code extension's `globalStorage/saoudrizwan.claude-dev`
 - **Roo Code** — the VS Code extension's `globalStorage/rooveterinaryinc.roo-cline` and the Roo CLI's `~/.vscode-mock/global-storage`
 
-## Install
+## Install this fork
+
+Requirements: Go 1.26+ (see `go.mod`) and Python 3. The Claude Code parts also need the
+`claude` CLI on `PATH`. The scheduled jobs (`--with-digest`, `--with-backup`)
+are macOS LaunchAgents.
+
+```sh
+git clone https://github.com/NChang007/aii.git ~/code/aii
+cd ~/code/aii
+sh integrations/claude-code/install.sh --with-mcp --with-digest --with-backup
+aii index
+```
+
+That one command:
+
+| Step | What it does |
+|---|---|
+| build | Builds `./cmd/aii` into `~/.local/bin/aii` (override with `AII_INSTALL_DIR`), swapping the file atomically so a running indexer or MCP server isn't killed |
+| skill | Copies `skills/aii/SKILL.md` to `~/.claude/skills/aii/SKILL.md`, keeping a timestamped backup of any different copy |
+| hook | Installs `~/.claude/hooks/aii-recall.sh` on `UserPromptSubmit` (prompts that refer to past work get up to 3 aii pointers; others get nothing) and `SubagentStart` (one line telling subagents aii exists), next to any hooks you already have |
+| `--with-mcp` | Registers `aii mcp` as a user-scope MCP server (`search`, `search_tasks`, `list_sessions`, `get_session`, `related`, `stats`) |
+| `--with-digest` | Hourly `aii digest`: task list + summary for each finished session, via `claude -p --model haiku` with tools, MCP and hooks off |
+| `--with-backup` | Weekly `aii backup` (Sunday 03:00): a compacted snapshot in `~/Backups/aii`, newest 2 kept |
+
+It is safe to re-run; run it again after `git pull` to update. Background
+indexing (every 5 minutes) is `aii cron install`. Open `/hooks` once in a
+running Claude Code session, or restart it, to load the hook. Details:
+[integrations/claude-code/README.md](integrations/claude-code/README.md).
+
+Without the Claude Code parts, just build the binary:
+
+```sh
+go build -o ~/.local/bin/aii ./cmd/aii
+```
+
+`go install github.com/NChang007/aii/...` does not work: the module path
+in `go.mod` is still upstream's, so build from a clone.
+
+## Upstream install (ericmason/aii, without this fork's changes)
 
 ### One-line install (macOS / Linux)
 
@@ -103,6 +162,9 @@ aii search "webhook retry"     # find conversations that touched it
 aii sessions --since 7d        # browse everything from the last week
 aii show <session-uid>         # print the whole session
 aii ask  "how did I fix the webhook retries?"  # RAG over your chats
+aii digest                     # record task lists + summaries (needs `claude`)
+aii tasks "webhook retry"      # which session handled it, and how it ended
+aii backup                     # snapshot the index to ~/Backups/aii
 ```
 
 Run `aii help` for a command list, or `aii help --json` to dump a
@@ -222,6 +284,51 @@ Command resolution: `--cmd` → `$AII_ASK_CMD` → `claude -p` if on PATH →
 
 `--dry-run` prints the prompt to stdout instead of running anything;
 use it for composition: `aii ask "..." --dry-run | ollama run llama3`.
+
+### `aii digest` — task list and summary per session
+
+```sh
+aii digest                          # up to 20 finished sessions
+aii digest --session cc/32e869ac    # one session
+aii digest --dry-run                # list what would run, print one prompt
+```
+
+For each session idle for an hour (`--idle`), sends your prompts in
+order, each with the opening of every reply it got, to an LLM that marks
+where you switched to a different goal. Stores one line per task ("what
+was done or decided — done | unfinished | abandoned | blocked"),
+anchored to the prompt that started it, and a summary of the whole
+session. Long sessions take a few calls (12 KB of outline each,
+`--max-chars`); a resumed session gets tasks for its new prompts and a
+refreshed summary. Default command: `claude -p --model haiku` with
+tools, MCP servers and hooks off and no transcript of its own; override
+with `--cmd` or `$AII_DIGEST_CMD`. Each call times out after 3 minutes;
+a session that fails 3 times in a row is skipped.
+
+### `aii tasks` — search the task lists
+
+```sh
+aii tasks "kitty tabs"              # matching tasks, recent sessions first
+aii tasks                           # most recent tasks
+aii tasks --session cc/32e869ac     # everything one session covered
+```
+
+Each line's cite token (`cc/32e869ac:319`) points at the prompt where the
+task started; pass it to `aii show`. `--sort mixed|relevance|recent`,
+`--workspace`, `--agent`, `--since` work as in `search`.
+
+### `aii backup` — snapshot the index
+
+```sh
+aii backup                          # ~/Backups/aii/aii-<UTC time>.db, keep 2
+aii backup --dir /Volumes/Ext/aii --keep 4
+```
+
+Writes a compacted, consistent copy with SQLite's `VACUUM INTO` (safe
+while indexing runs), checks it with `quick_check`, then removes older
+`aii-<timestamp>.db` snapshots beyond `--keep`. The index can be the only
+copy of sessions whose transcripts have been cleaned up, so keep at least
+one snapshot on another disk if you can.
 
 ### `aii related` — pivot to similar sessions
 
@@ -391,9 +498,12 @@ See `AGENTS.md` for a condensed agent-facing manual with call patterns.
 ### Claude Code skill
 
 This repo ships a Claude Code skill at `skills/aii/SKILL.md` that
-teaches the agent when to search, the chain pattern (`search` →
-`get_session`), cite-token grammar, and the query idioms that actually
-work. Install it once:
+teaches the agent when to search, to start from the task lists
+(`aii tasks` / `search_tasks`), the chain pattern (`search` →
+`get_session`), cite-token grammar, roles, subagents, ranking, and the
+query idioms that actually work. `integrations/claude-code/install.sh`
+installs it along with the recall hook (see
+[Install this fork](#install-this-fork)). To install only the skill:
 
 ```sh
 # user-wide (all projects)
