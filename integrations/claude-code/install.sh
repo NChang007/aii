@@ -48,6 +48,16 @@ if [ "${AII_SKIP_BUILD:-}" != "1" ]; then
     (cd "$ROOT" && go build -o "$BIN_DIR/.aii.new" ./cmd/aii)
     mv -f "$BIN_DIR/.aii.new" "$BIN_DIR/aii"
     echo "built   $BIN_DIR/aii ($("$BIN_DIR/aii" version 2>/dev/null | head -1))"
+    # launchd pins a code requirement to the binary it last spawned and
+    # refuses a rebuilt one (exit 78, EX_CONFIG) until the job is reloaded.
+    if [ "$(uname -s)" = Darwin ]; then
+        for label in com.aii.index com.aii.digest; do
+            plist="$HOME/Library/LaunchAgents/$label.plist"
+            [ -f "$plist" ] || continue
+            launchctl unload "$plist" 2>/dev/null || true
+            launchctl load "$plist" 2>/dev/null && echo "reload  $label"
+        done
+    fi
 fi
 
 # --- skill --------------------------------------------------------------

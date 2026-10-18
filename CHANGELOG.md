@@ -20,7 +20,9 @@ called out under **Changed** when they happen.
   that fails 3 times is skipped so it can't block the rest. The Claude Code
   installer's `--with-digest` runs it hourly on macOS.
 - The Claude Code installer replaces the binary atomically, so a
-  running indexer or `aii mcp` server is no longer killed mid-run.
+  running indexer or `aii mcp` server is no longer killed mid-run. It
+  then reloads aii's LaunchAgents, which macOS otherwise refuses to start
+  against a rebuilt binary (exit 78) until reloaded.
 - The Claude Code installer also registers the recall hook on
   `SubagentStart`, so subagents are told aii exists (one line; the event
   carries no task text to search on). Skill backups are timestamped, so
