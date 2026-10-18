@@ -9,6 +9,14 @@ called out under **Changed** when they happen.
 ## [Unreleased]
 
 ### Added
+- Claude Code subagent transcripts (`<session>/subagents/agent-*.jsonl`)
+  are indexed as their own sessions, titled `<agentType>: <description>`
+  from their `.meta.json` and linked to the session that spawned them
+  (`parent` in list output, "subagent of …" in pretty output). The task
+  the parent agent gave is role `agent`, so `--role user` still returns
+  only what you typed. `aii sessions --parent <cite>` and MCP
+  `list_sessions(parent=…)` list a session's subagents; `aii digest`
+  summarises them like any session.
 - `aii digest` writes a one-line summary (what was wanted, what was
   decided or built, how it ended) for finished sessions that have none,
   so `aii sessions`, search results and MCP `list_sessions` say what a
@@ -57,6 +65,12 @@ called out under **Changed** when they happen.
 - Roo Code tasks are now indexed, from the VS Code extension (`globalStorage/rooveterinaryinc.roo-cline`) and the Roo CLI (`~/.vscode-mock/global-storage`). Filter with `--source roo` / `--agent roo`; cite tokens use `roo/`.
 
 ### Changed
+- Search results default to `--sort mixed`: relevance weighted toward
+  recent sessions (activity today counts double, two weeks old 1.5x, a
+  year old ~1.04x), so current work comes first while a much better old
+  match still wins. `--sort relevance` restores pure bm25 order and
+  `--sort recent` lists newest first; MCP `search` takes `sort` too.
+  `aii related` keeps pure relevance.
 - Indexing never loses history. `aii index --full`, or a transcript
   that shrank or was rewritten, no longer deletes the file's sessions: a
   re-read at least as long as what is stored replaces that session's

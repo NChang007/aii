@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 type Query struct {
@@ -16,6 +17,32 @@ type Query struct {
 	UntilUnix int64
 	Limit     int
 	Offset    int // skip this many sessions before Limit — for pagination
+	// Sort orders matching sessions: "mixed" (default) weighs relevance
+	// by recency, "relevance" is bm25 alone, "recent" is newest first.
+	Sort string
+	// NowUnix is "now" for recency; 0 means the current time.
+	NowUnix int64
+}
+
+// Recency boost for Sort "mixed": a session's bm25 score is multiplied by
+// 1 + 1/(1 + age/recencyHalfLifeDays), so activity today counts double,
+// two weeks old 1.5x, a year old ~1.04x. A much better match still beats
+// a weak recent one.
+const recencyHalfLifeDays = 14.0
+
+// sortKeySQL returns the expression top_sessions orders by (ascending)
+// and the args it needs. bm25 scores are negative: lower is better.
+func sortKeySQL(sort string, now int64) (string, []any, error) {
+	const last = "COALESCE(s2.ended_at, s2.started_at, 0)"
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "", "mixed":
+		return fmt.Sprintf("ss.best_score * (1.0 + 1.0 / (1.0 + MAX(0, ? - %s) / 86400.0 / %f))", last, recencyHalfLifeDays), []any{now}, nil
+	case "relevance":
+		return "ss.best_score", nil, nil
+	case "recent":
+		return "-" + last, nil, nil
+	}
+	return "", nil, fmt.Errorf("unknown sort %q (want mixed, relevance or recent)", sort)
 }
 
 // Excerpt is one matching message within a session.
@@ -44,8 +71,9 @@ type Result struct {
 // maxExcerptsPerSession is how many snippets we surface per result.
 const maxExcerptsPerSession = 3
 
-// Search returns one Result per matching session, ranked by that session's
-// best bm25 score, and attaches the top few excerpts for context.
+// Search returns one Result per matching session, ranked by q.Sort (by
+// default its best bm25 score weighted toward recent sessions), and
+// attaches the top few excerpts for context.
 //
 // The hit set is the UNION of two FTS indexes:
 //   - messages_fts     (porter/unicode61) — natural-language matches
@@ -107,6 +135,15 @@ func (d *DB) Search(q Query) ([]Result, error) {
 	const triPenalty = 0.7 // bm25 returns negative scores; scale shrinks magnitude
 	var args []any
 
+	now := q.NowUnix
+	if now == 0 {
+		now = time.Now().Unix()
+	}
+	sortKey, sortArgs, err := sortKeySQL(q.Sort, now)
+	if err != nil {
+		return nil, err
+	}
+
 	// One read transaction so the snippet pass sees the same snapshot as
 	// the ranking pass, even while the indexer writes.
 	tx, err := d.Begin()
@@ -164,8 +201,9 @@ func (d *DB) Search(q Query) ([]Result, error) {
             FROM raw_hits GROUP BY session_id
         ),
         top_sessions AS MATERIALIZED (
-            SELECT session_id, best_score, match_count
-            FROM session_scores ORDER BY best_score LIMIT ? OFFSET ?
+            SELECT ss.session_id, ss.best_score, ss.match_count, %s AS sort_key
+            FROM session_scores ss JOIN sessions s2 ON s2.id = ss.session_id
+            ORDER BY sort_key, ss.best_score LIMIT ? OFFSET ?
         ),
         page_hits AS (
             SELECT * FROM (
@@ -188,8 +226,9 @@ func (d *DB) Search(q Query) ([]Result, error) {
         JOIN sessions s ON s.id = r.session_id
         JOIN top_sessions ts_info ON ts_info.session_id = r.session_id
         WHERE r.rn <= %d
-        ORDER BY ts_info.best_score, s.id, r.rn`,
-		rawHits, maxExcerptsPerSession)
+        ORDER BY ts_info.sort_key, ts_info.best_score, s.id, r.rn`,
+		rawHits, sortKey, maxExcerptsPerSession)
+	args = append(args, sortArgs...)
 	args = append(args, q.Limit, q.Offset)
 
 	out, refs, err := scanSearchRows(tx, query, args)

@@ -55,6 +55,8 @@ func NormalizeRole(r string) string {
 		return "tool"
 	case "system", "sys":
 		return "system"
+	case "agent", "parent":
+		return "agent"
 	}
 	return r
 }

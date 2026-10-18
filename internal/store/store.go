@@ -21,6 +21,9 @@ type Session struct {
 	Workspace     string
 	Title         string
 	Summary       string
+	// ParentUID is set on a subagent's session: the uid of the session
+	// that spawned it.
+	ParentUID     string
 	StartedAt     int64
 	EndedAt       int64
 	SourcePath    string
@@ -79,6 +82,7 @@ func Open(path string) (*DB, error) {
 	// Idempotent additive migrations. Older DBs won't have these columns.
 	for _, alter := range []string{
 		`ALTER TABLE sessions ADD COLUMN summary TEXT`,
+		`ALTER TABLE sessions ADD COLUMN parent_uid TEXT`,
 	} {
 		if _, err := db.Exec(alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -297,18 +301,19 @@ func migrateTrigram(db *sql.DB) error {
 // UpsertSession returns the session row id.
 func (d *DB) UpsertSession(s *Session) (int64, error) {
 	_, err := d.Exec(`
-        INSERT INTO sessions (agent, session_uid, workspace, title, summary, started_at, ended_at, source_path, source_mtime_ns, source_size)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (agent, session_uid, workspace, title, summary, parent_uid, started_at, ended_at, source_path, source_mtime_ns, source_size)
+        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?)
         ON CONFLICT(agent, session_uid) DO UPDATE SET
             workspace       = COALESCE(NULLIF(excluded.workspace, ''), sessions.workspace),
             title           = COALESCE(NULLIF(excluded.title, ''), sessions.title),
             summary         = COALESCE(NULLIF(excluded.summary, ''), sessions.summary),
+            parent_uid      = COALESCE(excluded.parent_uid, sessions.parent_uid),
             started_at      = COALESCE(sessions.started_at, excluded.started_at),
             ended_at        = MAX(COALESCE(sessions.ended_at, 0), COALESCE(excluded.ended_at, 0)),
             source_path     = excluded.source_path,
             source_mtime_ns = excluded.source_mtime_ns,
             source_size     = excluded.source_size`,
-		s.Agent, s.UID, s.Workspace, s.Title, s.Summary,
+		s.Agent, s.UID, s.Workspace, s.Title, s.Summary, s.ParentUID,
 		nullIfZero(s.StartedAt), nullIfZero(s.EndedAt),
 		s.SourcePath, s.SourceMtimeNs, s.SourceSize)
 	if err != nil {
@@ -435,12 +440,12 @@ func (d *DB) Stats() ([]Stats, error) {
 
 func (d *DB) SessionByUID(agent, uid string) (*Session, error) {
 	row := d.QueryRow(`SELECT id, agent, session_uid, COALESCE(workspace,''), COALESCE(title,''),
-                              COALESCE(summary,''),
+                              COALESCE(summary,''), COALESCE(parent_uid,''),
                               COALESCE(started_at,0), COALESCE(ended_at,0), source_path,
                               source_mtime_ns, source_size
                        FROM sessions WHERE agent = ? AND session_uid = ?`, agent, uid)
 	s := &Session{}
-	if err := row.Scan(&s.ID, &s.Agent, &s.UID, &s.Workspace, &s.Title, &s.Summary,
+	if err := row.Scan(&s.ID, &s.Agent, &s.UID, &s.Workspace, &s.Title, &s.Summary, &s.ParentUID,
 		&s.StartedAt, &s.EndedAt,
 		&s.SourcePath, &s.SourceMtimeNs, &s.SourceSize); err != nil {
 		if err == sql.ErrNoRows {
@@ -523,6 +528,8 @@ type SessionFilter struct {
 	// tool message — i.e. the assistant never got a chance to respond,
 	// suggesting the session was interrupted or crashed.
 	EndedMidTask bool
+	// Parent restricts to subagent sessions spawned by this session uid.
+	Parent string
 }
 
 // SessionListItem is a Session augmented with its message count, used by
@@ -575,6 +582,10 @@ func (d *DB) ListSessions(f SessionFilter) ([]SessionListItem, error) {
 	if f.EndedMidTask {
 		clauses = append(clauses, endedMidTaskSQL)
 	}
+	if f.Parent != "" {
+		clauses = append(clauses, "s.parent_uid = ?")
+		args = append(args, f.Parent)
+	}
 	where := ""
 	if len(clauses) > 0 {
 		where = "WHERE " + strings.Join(clauses, " AND ")
@@ -583,6 +594,7 @@ func (d *DB) ListSessions(f SessionFilter) ([]SessionListItem, error) {
 	q := fmt.Sprintf(`
         SELECT s.id, s.agent, s.session_uid,
                COALESCE(s.workspace, ''), COALESCE(s.title, ''), COALESCE(s.summary, ''),
+               COALESCE(s.parent_uid, ''),
                COALESCE(s.started_at, 0), COALESCE(s.ended_at, 0),
                s.source_path, s.source_mtime_ns, s.source_size,
                (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count
@@ -602,6 +614,7 @@ func (d *DB) ListSessions(f SessionFilter) ([]SessionListItem, error) {
 	for rows.Next() {
 		var it SessionListItem
 		if err := rows.Scan(&it.ID, &it.Agent, &it.UID, &it.Workspace, &it.Title, &it.Summary,
+			&it.ParentUID,
 			&it.StartedAt, &it.EndedAt,
 			&it.SourcePath, &it.SourceMtimeNs, &it.SourceSize,
 			&it.MessageCount); err != nil {
@@ -639,6 +652,10 @@ func (d *DB) CountSessions(f SessionFilter) (int64, error) {
 	// EXISTS subquery to reference the bare table.
 	if f.EndedMidTask {
 		clauses = append(clauses, strings.ReplaceAll(endedMidTaskSQL, "s.id", "sessions.id"))
+	}
+	if f.Parent != "" {
+		clauses = append(clauses, "parent_uid = ?")
+		args = append(args, f.Parent)
 	}
 	where := ""
 	if len(clauses) > 0 {

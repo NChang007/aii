@@ -75,6 +75,12 @@ func (s *Source) Scan(ctx context.Context, db *store.DB, full bool, out chan<- s
 	if err != nil {
 		return fmt.Errorf("glob %s: %w", root, err)
 	}
+	// Subagent transcripts: <project>/<session>/subagents/agent-<id>.jsonl.
+	subagents, err := filepath.Glob(filepath.Join(root, "*", "*", "subagents", "*.jsonl"))
+	if err != nil {
+		return fmt.Errorf("glob %s: %w", root, err)
+	}
+	entries = append(entries, subagents...)
 	for _, path := range entries {
 		select {
 		case <-ctx.Done():
@@ -138,6 +144,9 @@ func (s *Source) scanFile(ctx context.Context, db *store.DB, path string, full b
 	sess, msgs, newOffset, aiTitle, err := parseDeltaTitle(ctx, f, startOffset, size)
 	if err != nil {
 		return err
+	}
+	if t := subagentTitle(abs); t != "" {
+		sess.Title, aiTitle = t, true
 	}
 	// On an incremental run the derived title comes from a later turn.
 	// Keep it only if the stored session has no title yet, which happens
@@ -238,6 +247,10 @@ type rawLine struct {
 	// IsMeta marks text Claude Code injected on the user's behalf: skill
 	// bodies, local-command caveats, messages from other agents.
 	IsMeta bool `json:"isMeta"`
+	// IsSidechain and AgentID mark a subagent's transcript. Its records
+	// carry the parent's sessionId.
+	IsSidechain bool   `json:"isSidechain"`
+	AgentID     string `json:"agentId"`
 	// AITitle is set on "ai-title" records: Claude Code's own short
 	// title for the session. Later records supersede earlier ones.
 	AITitle string `json:"aiTitle"`
@@ -402,6 +415,11 @@ func handleLine(line []byte, lineStart int64, sess *store.Session, _ int) ([]sto
 	}
 
 	// Set session-level metadata opportunistically.
+	if sess.UID == "" && rec.IsSidechain && rec.AgentID != "" {
+		// A subagent is its own session, linked to the one that spawned it.
+		sess.UID = rec.AgentID
+		sess.ParentUID = rec.SessionID
+	}
 	if sess.UID == "" && rec.SessionID != "" {
 		sess.UID = rec.SessionID
 	}
@@ -445,8 +463,12 @@ func userMessage(rec rawLine, lineStart int64) []store.Message {
 	text, tool := extractUserContent(inner.Content)
 	ts := parseTS(rec.Timestamp)
 	role := "user"
-	if rec.IsMeta {
+	switch {
+	case rec.IsMeta:
 		role = "system"
+	case rec.IsSidechain:
+		// In a subagent's transcript the "user" is the parent agent.
+		role = "agent"
 	}
 
 	var out []store.Message
@@ -675,6 +697,30 @@ func firstUserText(msgs []store.Message) string {
 		}
 	}
 	return fallback
+}
+
+// subagentTitle returns "<agentType>: <description>" from the .meta.json
+// Claude Code writes beside a subagent transcript, or "" for any other file.
+func subagentTitle(path string) string {
+	if filepath.Base(filepath.Dir(path)) != "subagents" {
+		return ""
+	}
+	b, err := os.ReadFile(strings.TrimSuffix(path, ".jsonl") + ".meta.json")
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		AgentType   string `json:"agentType"`
+		Description string `json:"description"`
+	}
+	if json.Unmarshal(b, &meta) != nil {
+		return ""
+	}
+	t := strings.TrimSpace(meta.Description)
+	if a := strings.TrimSpace(meta.AgentType); a != "" && t != "" {
+		t = a + ": " + t
+	}
+	return truncateRunes(strings.Join(strings.Fields(t), " "), maxTitleRunes)
 }
 
 // shortID trims Claude's tool_use_... ids to something more eyeball-friendly.

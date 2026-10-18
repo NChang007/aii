@@ -25,7 +25,7 @@ func (d *DB) SessionsNeedingSummary(f SummaryFilter) ([]*Session, error) {
 		`COALESCE(s.summary, '') = ''`,
 		`COALESCE(s.ended_at, 0) < ?`,
 		// Only prose counts: digest sends nothing else to the model.
-		`(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id AND m.role IN ('user','assistant')) >= ?`,
+		`(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id AND m.role IN ('user','assistant','agent')) >= ?`,
 		`COALESCE((SELECT attempts FROM digest_attempts a WHERE a.session_id = s.id), 0) < ?`,
 	}
 	args := []any{f.EndedBefore, f.MinMessages, maxDigestAttempts}

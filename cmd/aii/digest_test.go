@@ -16,9 +16,10 @@ func TestDigestTranscriptKeepsProseOnly(t *testing.T) {
 		{Ordinal: 4, Role: "thinking", Content: "hmm"},
 		{Ordinal: 5, Role: "assistant", Content: "[tool_use name=Bash] {}"},
 		{Ordinal: 6, Role: "assistant", Content: "Done: tabs are 12px."},
+		{Ordinal: 7, Role: "agent", Content: "Review the diff"},
 	}
 	got := digestTranscript(rows, 10000)
-	want := "user: make the tabs smaller\nassistant: Shrinking them.\nassistant: Done: tabs are 12px.\n"
+	want := "user: make the tabs smaller\nassistant: Shrinking them.\nassistant: Done: tabs are 12px.\ntask: Review the diff\n"
 	if got != want {
 		t.Errorf("digestTranscript =\n%q\nwant\n%q", got, want)
 	}

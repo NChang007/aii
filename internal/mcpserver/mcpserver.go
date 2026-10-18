@@ -57,7 +57,10 @@ func registerTools(s *server.MCPServer, db *store.DB) {
 			mcp.WithString("workspace",
 				mcp.Description("Exact workspace path to restrict to.")),
 			mcp.WithString("role",
-				mcp.Description("Restrict to messages from one speaker: user | assistant | tool | thinking | system.")),
+				mcp.Description("Restrict to messages from one speaker: user | assistant | tool | thinking | system | agent.")),
+			mcp.WithString("sort",
+				mcp.DefaultString("mixed"),
+				mcp.Description("mixed (default: relevance weighted toward recent sessions) | relevance | recent (newest first).")),
 			mcp.WithString("since",
 				mcp.Description("Relative duration (7d, 24h, 2w) or YYYY-MM-DD / RFC3339.")),
 			mcp.WithNumber("limit",
@@ -94,7 +97,7 @@ func registerTools(s *server.MCPServer, db *store.DB) {
 			mcp.WithNumber("to",
 				mcp.Description("Last ordinal to include (inclusive). Mutually exclusive with around.")),
 			mcp.WithString("role",
-				mcp.Description("Keep only messages from this role: user | assistant | tool | thinking | system.")),
+				mcp.Description("Keep only messages from this role: user | assistant | tool | thinking | system | agent.")),
 			mcp.WithNumber("max_msg_chars",
 				mcp.DefaultNumber(0),
 				mcp.Description("Truncate each message's content to this many chars (0 = no cap).")),
@@ -153,6 +156,8 @@ func registerTools(s *server.MCPServer, db *store.DB) {
 				mcp.Description("Sort direction by session time: asc (oldest first) or desc (newest first).")),
 			mcp.WithBoolean("ended_mid_task",
 				mcp.Description("Only return sessions whose final message was from user or tool — i.e. the assistant never responded. Use to recover interrupted threads.")),
+			mcp.WithString("parent",
+				mcp.Description("Only subagent sessions spawned by this session (uid or cite token). Each subagent result carries its parent's cite.")),
 		),
 		makeListSessionsHandler(db),
 	)
@@ -178,6 +183,7 @@ type searchArgs struct {
 	Since     string  `json:"since"`
 	Limit     float64 `json:"limit"`
 	Offset    float64 `json:"offset"`
+	Sort      string  `json:"sort"`
 }
 
 type searchHit struct {
@@ -225,6 +231,7 @@ func makeSearchHandler(db *store.DB) server.ToolHandlerFunc {
 			SinceUnix: since,
 			Limit:     limit,
 			Offset:    int(a.Offset),
+			Sort:      a.Sort,
 		})
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("search failed", err), nil
@@ -437,6 +444,7 @@ func makeRelatedHandler(db *store.DB) server.ToolHandlerFunc {
 			Agent:     NormalizeAgent(a.Agent),
 			SinceUnix: since,
 			Limit:     limit + 1,
+			Sort:      "relevance", // similarity, not recency
 		})
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("search failed", err), nil
@@ -522,6 +530,7 @@ type listSessionsArgs struct {
 	Offset       float64 `json:"offset"`
 	Order        string  `json:"order"`
 	EndedMidTask bool    `json:"ended_mid_task"`
+	Parent       string  `json:"parent"`
 }
 
 type sessionItem struct {
@@ -530,6 +539,7 @@ type sessionItem struct {
 	UID          string `json:"uid"`
 	Title        string `json:"title,omitempty"`
 	Summary      string `json:"summary,omitempty"`
+	Parent       string `json:"parent,omitempty"`
 	Workspace    string `json:"workspace,omitempty"`
 	StartedAt    int64  `json:"started_at,omitempty"`
 	EndedAt      int64  `json:"ended_at,omitempty"`
@@ -566,6 +576,7 @@ func makeListSessionsHandler(db *store.DB) server.ToolHandlerFunc {
 			Offset:       int(a.Offset),
 			Order:        a.Order,
 			EndedMidTask: a.EndedMidTask,
+			Parent:       resolveParent(db, a.Parent),
 		})
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("list_sessions failed", err), nil
@@ -578,6 +589,7 @@ func makeListSessionsHandler(db *store.DB) server.ToolHandlerFunc {
 				UID:          s.UID,
 				Title:        s.Title,
 				Summary:      s.Summary,
+				Parent:       parentCite(db, s.Agent, s.ParentUID),
 				Workspace:    s.Workspace,
 				StartedAt:    s.StartedAt,
 				EndedAt:      s.EndedAt,
@@ -629,4 +641,31 @@ func makeStatsHandler(db *store.DB) server.ToolHandlerFunc {
 		}
 		return mcp.NewToolResultStructured(payload, fb.String()), nil
 	}
+}
+
+// resolveParent turns a parent argument (uid, short uid, or cite token)
+// into the stored session uid; unresolvable input is used as is.
+func resolveParent(db *store.DB, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if i := strings.IndexByte(ref, '/'); i >= 0 {
+		ref = ref[i+1:]
+	}
+	if i := strings.IndexByte(ref, ':'); i >= 0 {
+		ref = ref[:i]
+	}
+	if s, err := db.SessionByUIDAny(ref); err == nil && s != nil {
+		return s.UID
+	}
+	return ref
+}
+
+// parentCite renders a subagent's parent as a cite token, or "".
+func parentCite(db *store.DB, agent, parentUID string) string {
+	if parentUID == "" {
+		return ""
+	}
+	return ShortAgent(agent) + "/" + ShortUID(db, parentUID)
 }

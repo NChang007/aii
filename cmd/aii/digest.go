@@ -165,13 +165,19 @@ func resolveDigestCmd(flag string) string {
 }
 
 // digestTranscript renders a session as "role: text" lines, keeping only
-// what the user typed and the assistant's prose (tool calls, tool output,
+// what the user typed (or, for a subagent, its task) and the assistant's prose (tool calls, tool output,
 // thinking and harness-injected text are dropped). Past maxChars it keeps
 // the opening (the ask) and the end (the outcome) around an elision.
 func digestTranscript(rows []store.Row, maxChars int) string {
 	var lines []string
 	for _, r := range rows {
-		if r.Role != "user" && r.Role != "assistant" {
+		label := r.Role
+		switch r.Role {
+		case "user", "assistant":
+		case "agent":
+			// A subagent's task, written by the agent that spawned it.
+			label = "task"
+		default:
 			continue
 		}
 		var keep []string
@@ -185,7 +191,7 @@ func digestTranscript(rows []store.Row, maxChars int) string {
 		if text == "" {
 			continue
 		}
-		lines = append(lines, r.Role+": "+text+"\n")
+		lines = append(lines, label+": "+text+"\n")
 	}
 	full := strings.Join(lines, "")
 	if maxChars <= 0 || len(full) <= maxChars {

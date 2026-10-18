@@ -257,8 +257,9 @@ func cmdSearch(args []string) error {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
 	agent := fs.String("agent", "", "cc|codex|cursor|pi|opencode|gemini|copilot|aider|cline|roo")
 	workspace := fs.String("workspace", "", "exact workspace path")
-	role := fs.String("role", "", "user|assistant|tool|thinking|system")
+	role := fs.String("role", "", "user|assistant|tool|thinking|system|agent")
 	since := fs.String("since", "", "7d | 2026-01-01")
+	sortBy := fs.String("sort", "mixed", "mixed (relevance weighted by recency) | relevance | recent")
 	limit := fs.Int("limit", 20, "max results")
 	offset := fs.Int("offset", 0, "skip this many results before returning (pagination)")
 	jsonOut := fs.Bool("json", false, "emit a single JSON array (all results)")
@@ -295,6 +296,7 @@ func cmdSearch(args []string) error {
 		SinceUnix: sinceUnix,
 		Limit:     *limit,
 		Offset:    *offset,
+		Sort:      *sortBy,
 	})
 	if err != nil {
 		return err
@@ -510,6 +512,8 @@ func normalizeRole(r string) string {
 		return "tool"
 	case "system", "sys":
 		return "system"
+	case "agent", "parent":
+		return "agent"
 	}
 	return r
 }
@@ -536,6 +540,7 @@ func cmdSessions(args []string) error {
 	offset := fs.Int("offset", 0, "skip this many sessions before returning (pagination)")
 	order := fs.String("order", "desc", "asc|desc — by session time")
 	endedMidTask := fs.Bool("ended-mid-task", false, "only show sessions whose final message was from user or tool (interrupted / unfinished)")
+	parent := fs.String("parent", "", "only subagent sessions spawned by this session (uid or cite token)")
 	jsonOut := fs.Bool("json", false, "emit a single JSON array (all results)")
 	ndjsonOut := fs.Bool("ndjson", false, "emit one JSON line per session")
 	agentFlag := fs.Bool("agent-mode", false, "force agent-oriented output (default when stdout is piped)")
@@ -571,6 +576,7 @@ func cmdSessions(args []string) error {
 		Offset:       *offset,
 		Order:        *order,
 		EndedMidTask: *endedMidTask,
+		Parent:       resolveParentUID(db, *parent),
 	})
 	if err != nil {
 		return err
@@ -621,6 +627,9 @@ func writeSessionsPretty(w *os.File, items []store.SessionListItem, offset, maxB
 		fmt.Fprintf(&b, "%s %s  %s  %s  %s %s %s\n",
 			rank, badge, dateCol, cite, cMuted("·"), cHead(truncate(title, 80)), msgs)
 		fmt.Fprintf(&b, "     %s %s\n", cMuted("↳"), cAccent(truncate(ws, 100)))
+		if s.ParentUID != "" {
+			fmt.Fprintf(&b, "     %s %s\n", cMuted("⤷"), cMuted("subagent of "+shortAgent(s.Agent)+"/"+shortUID(s.ParentUID)))
+		}
 		if sm := strings.TrimSpace(s.Summary); sm != "" {
 			fmt.Fprintf(&b, "     %s %s\n", cMuted("▌"), cDim(truncate(sm, 180)))
 		}
@@ -635,6 +644,7 @@ type ndjsonSession struct {
 	UID          string `json:"uid"`
 	Title        string `json:"title,omitempty"`
 	Summary      string `json:"summary,omitempty"`
+	Parent       string `json:"parent,omitempty"`
 	Workspace    string `json:"workspace,omitempty"`
 	StartedAt    int64  `json:"started_at,omitempty"`
 	EndedAt      int64  `json:"ended_at,omitempty"`
@@ -652,6 +662,7 @@ func writeSessionsNDJSON(w *os.File, items []store.SessionListItem, offset, maxB
 			UID:          s.UID,
 			Title:        s.Title,
 			Summary:      s.Summary,
+			Parent:       parentCite(s.Agent, s.ParentUID),
 			Workspace:    s.Workspace,
 			StartedAt:    s.StartedAt,
 			EndedAt:      s.EndedAt,
@@ -862,7 +873,7 @@ func cmdShow(args []string) error {
 	span := fs.Int("span", 3, "messages of context to show on each side of --around")
 	from := fs.Int("from", -1, "first ordinal to include (inclusive)")
 	to := fs.Int("to", -1, "last ordinal to include (inclusive)")
-	role := fs.String("role", "", "user|assistant|tool|thinking|system — keep only messages with this role")
+	role := fs.String("role", "", "user|assistant|tool|thinking|system|agent — keep only messages with this role")
 	maxMsgChars := fs.Int("max-msg-chars", 0, "truncate each message's content to this many chars (0 = no cap)")
 	maxBytes := fs.Int("max-bytes", 0, "soft cap on total output bytes (0 = no cap)")
 	fs.Parse(reorderFlags(args))
@@ -1238,6 +1249,7 @@ func cmdRelated(args []string) error {
 		Agent:     normalizeAgent(*agent),
 		SinceUnix: sinceUnix,
 		Limit:     *limit + 1,
+		Sort:      "relevance", // similarity, not recency
 	})
 	if err != nil {
 		return err
@@ -1363,7 +1375,7 @@ func cmdHelpJSON() error {
 				{"--redact-sources", "", "also rewrite the original JSONL transcripts in place with redacted content (destructive; JSONL sources only)"},
 			}},
 			{"search", "Hybrid (porter + trigram) full-text search over all transcripts", "aii search <query> [--agent ..] [--workspace ..] [--role ..] [--since ..] [--limit 20] [--offset 0] [--json|--ndjson|--pretty | --format pretty|json|ndjson] [--max-bytes N]", []flagInfo{
-				{"--role", "", "filter messages by speaker role (user|assistant|tool|thinking|system)"},
+				{"--role", "", "filter messages by speaker role (user|assistant|tool|thinking|system|agent)"},
 				{"--offset", "0", "skip N results — use with --limit for pagination"},
 				{"--ndjson", "", "stream one JSON object per excerpt — default when stdout is piped"},
 				{"--format", "", "pretty|json|ndjson — alternative spelling of --pretty/--json/--ndjson"},
@@ -1739,4 +1751,31 @@ func parseSince(s string) (int64, error) {
 		return t.Unix(), nil
 	}
 	return 0, fmt.Errorf("invalid --since %q (expected 7d, 2h, or 2026-01-01)", s)
+}
+
+// resolveParentUID turns a --parent value (full uid, short uid, or cite
+// token) into the stored session uid; unresolvable input is used as is.
+func resolveParentUID(db *store.DB, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if i := strings.IndexByte(ref, '/'); i >= 0 {
+		ref = ref[i+1:]
+	}
+	if i := strings.IndexByte(ref, ':'); i >= 0 {
+		ref = ref[:i]
+	}
+	if s, err := db.SessionByUIDAny(ref); err == nil && s != nil {
+		return s.UID
+	}
+	return ref
+}
+
+// parentCite renders a subagent's parent as a cite token, or "".
+func parentCite(agent, parentUID string) string {
+	if parentUID == "" {
+		return ""
+	}
+	return shortAgent(agent) + "/" + shortUID(parentUID)
 }

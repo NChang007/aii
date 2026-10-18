@@ -83,3 +83,53 @@ func TestIncrementalRunsKeepFirstTitle(t *testing.T) {
 		t.Fatalf("after run 3 title = %q, want %q", got, "real title")
 	}
 }
+
+// Subagent transcripts live at <project>/<session>/subagents/agent-<id>.jsonl.
+// Each is indexed as its own session, linked to its parent: its records
+// carry the parent's sessionId, so the agent id must become the uid or
+// its messages would collide with the parent's.
+func TestSubagentTranscriptsAreIndexed(t *testing.T) {
+	root := t.TempDir()
+	proj := filepath.Join(root, "proj")
+	sub := filepath.Join(proj, "s1", "subagents")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appendLine(t, filepath.Join(proj, "s1.jsonl"), userRecord("parent prompt"))
+	agent := filepath.Join(sub, "agent-abc123.jsonl")
+	appendLine(t, agent, `{"type":"user","isSidechain":true,"agentId":"abc123","sessionId":"s1","cwd":"/w","timestamp":"2026-01-01T00:01:00Z","message":{"role":"user","content":"Review the diff"}}`)
+	appendLine(t, agent, `{"type":"assistant","isSidechain":true,"agentId":"abc123","sessionId":"s1","cwd":"/w","timestamp":"2026-01-01T00:02:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Found two bugs."}]}}`)
+	if err := os.WriteFile(filepath.Join(sub, "agent-abc123.meta.json"), []byte(`{"agentType":"code-reviewer","description":"Review role fix diff"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "aii.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := indexer.Run(context.Background(), db, []source.Source{&claudecode.Source{Root: root}}, indexer.Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	parent, _ := db.SessionByUID("claude_code", "s1")
+	child, _ := db.SessionByUID("claude_code", "abc123")
+	if parent == nil || child == nil {
+		t.Fatalf("parent %v, child %v; want both indexed", parent, child)
+	}
+	if child.ParentUID != "s1" || child.Title != "code-reviewer: Review role fix diff" {
+		t.Errorf("child parent=%q title=%q", child.ParentUID, child.Title)
+	}
+	rows, _ := db.SessionMessages(child.ID)
+	if len(rows) != 2 || rows[0].Role != "agent" || rows[1].Role != "assistant" {
+		t.Errorf("child rows = %+v, want the parent agent's prompt as role agent", rows)
+	}
+	prow, _ := db.SessionMessages(parent.ID)
+	if len(prow) != 1 || prow[0].Content != "parent prompt" {
+		t.Errorf("parent rows = %+v, want only its own message", prow)
+	}
+	kids, err := db.ListSessions(store.SessionFilter{Parent: "s1"})
+	if err != nil || len(kids) != 1 || kids[0].UID != "abc123" {
+		t.Errorf("ListSessions(Parent) = %+v, %v", kids, err)
+	}
+}

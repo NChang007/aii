@@ -98,6 +98,9 @@ Each ndjson line is self-contained — no cross-line state to track.
 - **Exact phrases** — `'"api key rotation"'` (inner double quotes).
 - **Narrow scope early** — `agent=cc since=30d workspace=/path`, then
   widen only if empty.
+- **Ranking** — results default to `sort=mixed`: relevance weighted toward
+  recent sessions. Use `sort=relevance` for the best match regardless of
+  age, `sort=recent` for newest first.
 
 ## Query idioms that DON'T work
 
@@ -116,6 +119,15 @@ Each ndjson line is self-contained — no cross-line state to track.
 - `role=tool` — tool output (command results, file reads).
 - `role=system` — text the agent's harness injected, not typed by the
   user (Claude Code skill bodies, command caveats, agent hand-offs).
+- `role=agent` — in a subagent's session, the task the parent agent gave it.
+
+## Subagents
+
+Claude Code subagent runs are indexed as their own sessions, titled
+`<agentType>: <description>`, each carrying its parent's cite
+(`parent` in list/search output, "subagent of …" in pretty output).
+`list_sessions(parent=<cite>)` / `aii sessions --parent <cite>` lists
+what a session delegated.
 
 ## Token budgets — be defensive
 
